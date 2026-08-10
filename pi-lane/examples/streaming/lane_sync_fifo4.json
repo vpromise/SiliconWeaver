@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "lane_sync_fifo4",
+    "description": "Implement a synchronous FIFO named lane_sync_fifo4 containing exactly four 8-bit unsigned entries. Use the exact declared top-level port order. All state changes occur only on rising edges of clk. rst_n is synchronous, active-low, and has highest priority; a sampled-low rst_n clears the read pointer, write pointer, count, overflow, and underflow even when push and pop are asserted, while memory contents need not be reset. Preserve strict first-in-first-out ordering and wrap both pointers modulo 4. Define pop_accept as pop && !empty and push_accept as push && (!full || pop_accept). An accepted push writes data_in at the current write pointer; an accepted pop removes the entry at the current read pointer. Push-only advances the write pointer and increments count, pop-only advances the read pointer and decrements count, simultaneous accepted push and pop advance both pointers with unchanged count, and no accepted operation preserves pointers, memory, and count. empty is combinational and asserted exactly when count is 0; full is combinational and asserted exactly when count is 4. data_out is combinational and continuously presents the oldest queued value, but must be 8'h00 whenever empty. There is no combinational fall-through or empty-queue bypass. A push while full without an accepted pop is rejected without changing FIFO contents, pointers, or count and asserts registered overflow for exactly one cycle. A pop while empty is rejected without removing data or changing FIFO state and asserts registered underflow for exactly one cycle. overflow and underflow default to zero on every non-reset cycle unless their corresponding rejected request occurs. When full and push and pop are both high, accept both, remove the previous head, append data_in as the newest tail, keep count at 4, and do not assert overflow. When empty and push and pop are both high, reject the pop, accept the push, assert underflow for one cycle, set count to 1, and do not bypass data_in to the rejected pop. Reset overrides all requests and error reporting. count is unsigned and must always remain in the range 0 through 4. The implementation must be synthesizable and must not use initial blocks, declaration initialization, delays, force or release, DPI, file I/O, or system tasks.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1},
+      {"name": "rst_n", "direction": "input", "width": 1},
+      {"name": "push", "direction": "input", "width": 1},
+      {"name": "pop", "direction": "input", "width": 1},
+      {"name": "data_in", "direction": "input", "width": 8, "signed": false},
+      {"name": "data_out", "direction": "output", "width": 8, "signed": false},
+      {"name": "empty", "direction": "output", "width": 1},
+      {"name": "full", "direction": "output", "width": 1},
+      {"name": "count", "direction": "output", "width": 3, "signed": false},
+      {"name": "overflow", "direction": "output", "width": 1},
+      {"name": "underflow", "direction": "output", "width": 1}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": false}
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "floorplan_sizing": "absolute",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "die_area": [0, 0, 300, 300],
+    "core_area": [20, 20, 280, 280],
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "model": "gpt-5.6-sol",
+    "n": 4,
+    "max_turns": 4,
+    "num_verify_tests": 200,
+    "independent_verify_tests": 500,
+    "temperature": 0.4,
+    "seed": 42,
+    "reasoning_effort": "xhigh"
+  },
+  "verification": {
+    "requirements": [
+      {"id": "REQ_RESET_PRIORITY", "text": "A sampled-low synchronous rst_n clears both pointers, count, overflow, and underflow with priority over push and pop; memory reset is not required and externally count is 0, empty is 1, full is 0, data_out is 0, and both error outputs are 0.", "kind": "reset", "signals": ["clk", "rst_n", "push", "pop", "data_out", "empty", "full", "count", "overflow", "underflow"]},
+      {"id": "REQ_FIFO_ORDER", "text": "Every accepted push appends data_in and every accepted pop removes the oldest queued byte, preserving strict FIFO order across all pointer wraparounds.", "kind": "functional", "signals": ["push", "pop", "data_in", "data_out", "empty", "full", "count"]},
+      {"id": "REQ_STATUS_INVARIANTS", "text": "count always remains from 0 through 4 inclusive, empty is 1 exactly when count is 0, full is 1 exactly when count is 4, and when nonempty data_out continuously equals the oldest queued byte while when empty data_out is 8'h00.", "kind": "invariant", "signals": ["data_out", "empty", "full", "count"], "latency_cycles": 0},
+      {"id": "REQ_ACCEPTANCE", "text": "pop_accept is pop and not empty; push_accept is push and either not full or pop_accept. Push-only increments count, pop-only decrements count, accepted simultaneous push and pop keep count unchanged, and pointer updates wrap modulo 4.", "kind": "protocol", "signals": ["push", "pop", "empty", "full", "count"]},
+      {"id": "REQ_OVERFLOW_PULSE", "text": "A push while full without an accepted pop is rejected with FIFO state preserved and overflow asserted for exactly that cycle; otherwise overflow defaults to 0, including accepted simultaneous push and pop while full.", "kind": "protocol", "signals": ["push", "pop", "data_in", "data_out", "full", "count", "overflow"]},
+      {"id": "REQ_UNDERFLOW_PULSE", "text": "A pop while empty is rejected with FIFO state preserved and underflow asserted for exactly that cycle; otherwise underflow defaults to 0.", "kind": "protocol", "signals": ["push", "pop", "data_in", "data_out", "empty", "count", "underflow"]},
+      {"id": "REQ_FULL_SIMULTANEOUS", "text": "When full with push and pop both high, both operations are accepted: remove the previous head, append data_in at the tail, advance both pointers, keep count at 4, preserve FIFO order, and leave overflow low.", "kind": "functional", "signals": ["push", "pop", "data_in", "data_out", "full", "count", "overflow"]},
+      {"id": "REQ_EMPTY_SIMULTANEOUS_NO_BYPASS", "text": "When empty with push and pop both high, reject the pop but accept the push, assert underflow for one cycle, set count to 1, and do not combinationally bypass data_in to the rejected pop.", "kind": "functional", "signals": ["push", "pop", "data_in", "data_out", "empty", "count", "underflow"]},
+      {"id": "REQ_RANDOM_WRAP_SCOREBOARD", "text": "Directed and randomized Cocotb verification must use a reference queue scoreboard, exercise at least eight read-pointer and write-pointer modulo-4 wraparounds with randomized traffic, preserve every passing test, and regress every minimized counterexample.", "kind": "functional", "signals": ["push", "pop", "data_in", "data_out", "empty", "full", "count", "overflow", "underflow"]}
+    ],
+    "directed_tests": [
+      {
+        "id": "TEST_RESET_FROM_NONEMPTY_WITH_REQUESTS",
+        "description": "Build a nonempty queue, then sample reset low while push and pop are both asserted and verify reset state and error suppression before normal operation resumes.",
+        "requirement_ids": ["REQ_RESET_PRIORITY", "REQ_STATUS_INVARIANTS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 161}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 178}},
+          {"drive": {"rst_n": 0, "push": 1, "pop": 1, "data_in": 195}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 0, "data_in": 0}}
+        ]
+      },
+      {
+        "id": "TEST_FILL_OVERFLOW_DRAIN_UNDERFLOW",
+        "description": "Fill with A1 B2 C3 D4, reject E5 while full and pulse overflow, drain in FIFO order, then reject an empty pop and pulse underflow with unchanged empty state.",
+        "requirement_ids": ["REQ_FIFO_ORDER", "REQ_STATUS_INVARIANTS", "REQ_ACCEPTANCE", "REQ_OVERFLOW_PULSE", "REQ_UNDERFLOW_PULSE"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 161}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 178}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 195}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 212}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 229}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 0, "data_in": 0}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 1, "data_in": 0}, "repeat": 4},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 1, "data_in": 0}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 0, "data_in": 0}}
+        ]
+      },
+      {
+        "id": "TEST_PARTIAL_SIMULTANEOUS_AND_WRAP",
+        "description": "In a partially filled FIFO, repeatedly accept simultaneous push and pop, checking scoreboard order while advancing both pointers through at least eight complete modulo-4 wraparounds.",
+        "requirement_ids": ["REQ_FIFO_ORDER", "REQ_ACCEPTANCE", "REQ_RANDOM_WRAP_SCOREBOARD"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 17}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 1, "data_in": 34}, "repeat": 32},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 1, "data_in": 0}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 0, "data_in": 0}}
+        ]
+      },
+      {
+        "id": "TEST_FULL_SIMULTANEOUS_REPLACEMENT",
+        "description": "Fill with A1 B2 C3 D4, simultaneously pop and push E5 while full without overflow, then drain and verify the resulting B2 C3 D4 E5 order.",
+        "requirement_ids": ["REQ_FIFO_ORDER", "REQ_STATUS_INVARIANTS", "REQ_FULL_SIMULTANEOUS", "REQ_OVERFLOW_PULSE"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 161}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 178}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 195}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 0, "data_in": 212}},
+          {"drive": {"rst_n": 1, "push": 1, "pop": 1, "data_in": 229}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 1, "data_in": 0}, "repeat": 4},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 0, "data_in": 0}}
+        ]
+      },
+      {
+        "id": "TEST_EMPTY_SIMULTANEOUS_NO_BYPASS",
+        "description": "From empty, assert push and pop together with E5, verify rejected pop underflow and accepted queued push without bypass, clear the pulse, then pop E5 on a later cycle.",
+        "requirement_ids": ["REQ_STATUS_INVARIANTS", "REQ_UNDERFLOW_PULSE", "REQ_EMPTY_SIMULTANEOUS_NO_BYPASS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "push": 1, "pop": 1, "data_in": 229}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 0, "data_in": 0}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 1, "data_in": 0}},
+          {"drive": {"rst_n": 1, "push": 0, "pop": 0, "data_in": 0}}
+        ]
+      }
+    ],
+    "max_repair_rounds": 8,
+    "repair_candidates": 4,
+    "stagnation_limit": 2,
+    "trace_window_cycles": 8,
+    "max_counterexamples": 128,
+    "directed_test_budget": 128,
+    "random_regression_cycles": 500,
+    "oracle_coverage_target_pct": 85,
+    "oracle_coverage_rounds": 2,
+    "oracle_coverage_cycle_budget": 256,
+    "adaptive_tests_per_round": 8,
+    "adaptive_cycle_budget": 128,
+    "internal_trace_signals": 64,
+    "verilator_lint": true,
+    "formal_mode": "required",
+    "formal_depth": 32,
+    "formal_timeout_seconds": 180
+  }
+}

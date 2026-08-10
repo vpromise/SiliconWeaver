@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: siliconweaver-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pi-lane-python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pi-lane/pyproject.toml
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --editable "./pi-lane[test]"
+      - name: Lint and test Pi-Lane
+        working-directory: pi-lane
+        run: |
+          ruff check src tests
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest
+      - name: Verify Pi-Lane CLI versions
+        run: |
+          lane-agent --version
+          pi-lane --version
+          pi-lanectl --version
+          pi-lane-orchestratord --version
+      - name: Build Pi-Lane wheel
+        run: python -m pip wheel --no-deps --wheel-dir dist ./pi-lane
+
+  rtl-closure-python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: rtl-closure/pyproject.toml
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --editable "./rtl-closure[test]"
+      - name: Lint and test RTL-Closure
+        working-directory: rtl-closure
+        run: |
+          ruff check src tests
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest
+      - run: rtl-closure --version
+      - name: Validate public specifications
+        run: |
+          for spec in pi-lane/specs/*.json pi-lane/examples/*/*.json rtl-closure/examples/*.json; do
+            rtl-closure validate --spec "$spec" >/dev/null
+          done
+      - name: Build RTL-Closure wheel
+        run: python -m pip wheel --no-deps --wheel-dir dist ./rtl-closure
+
+  pi-lane-monitor:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: pi-lane
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: pi-lane/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check

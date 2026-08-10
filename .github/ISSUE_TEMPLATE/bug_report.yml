@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible SiliconWeaver defect using synthetic data.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private endpoints, proprietary RTL, commercial PDK files, or NDA logs.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Pi-Lane
+        - RTL-Closure
+        - Monitor
+        - CI or packaging
+        - Cross-component workflow
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: pi-lane 0.5.1, rtl-closure 0.6.1, or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem
+      description: Describe the expected behavior and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Synthetic reproduction
+      description: Provide minimal steps and sanitized output.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, architecture, Python, Node, Docker, and relevant open-tool versions.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private endpoints, proprietary designs, commercial PDK material, and NDA logs.
+          required: true

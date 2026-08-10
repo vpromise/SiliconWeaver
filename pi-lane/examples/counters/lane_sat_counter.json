@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "lane_sat_counter",
+    "description": "Implement an 8-bit unsigned synchronous saturating up-counter with the exact top-level module name lane_sat_counter and the exact declared port order. All sequential state changes occur only on the rising edge of clk. rst_n is synchronous, active-low, and has highest priority: when rst_n is sampled low, count becomes 0 even if load and enable are both high. Otherwise load has priority over enable and sets count to the unsigned 8-bit load_value. Otherwise, when enable is high and count is less than 255, count increments by exactly 1. In all other cases count holds its current value, including every enabled cycle when count is already 255, so it never wraps to 0. saturated is combinational with zero-cycle latency and is 1 exactly when count equals 255, otherwise 0. Do not use initial blocks, declaration initialization, delays, force or release, DPI, file I/O, or system tasks.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1},
+      {"name": "rst_n", "direction": "input", "width": 1},
+      {"name": "load", "direction": "input", "width": 1},
+      {"name": "enable", "direction": "input", "width": 1},
+      {"name": "load_value", "direction": "input", "width": 8},
+      {"name": "count", "direction": "output", "width": 8},
+      {"name": "saturated", "direction": "output", "width": 1}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": false}
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "floorplan_sizing": "absolute",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "die_area": [0, 0, 300, 300],
+    "core_area": [20, 20, 280, 280],
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "model": "gpt-5.6-sol",
+    "n": 3,
+    "max_turns": 3,
+    "num_verify_tests": 100,
+    "independent_verify_tests": 300,
+    "temperature": 0.4,
+    "seed": 42,
+    "reasoning_effort": "xhigh"
+  },
+  "verification": {
+    "requirements": [
+      {"id": "REQ_SYNC_RESET_PRIORITY", "text": "On a rising edge, sampled-low rst_n sets count to 0 with highest priority, including when load and enable are high; rst_n is synchronous and active-low.", "kind": "reset", "signals": ["clk", "rst_n", "load", "enable", "count"]},
+      {"id": "REQ_IDLE_HOLD", "text": "When rst_n is high and both load and enable are low, count holds its current value.", "kind": "functional", "signals": ["rst_n", "load", "enable", "count"]},
+      {"id": "REQ_LOAD_PRIORITY", "text": "When rst_n is high and load is high, count becomes load_value on the rising edge even when enable is also high.", "kind": "protocol", "signals": ["rst_n", "load", "enable", "load_value", "count"]},
+      {"id": "REQ_INCREMENT", "text": "When rst_n is high, load is low, enable is high, and count is below 255, count increments by exactly 1 on the rising edge.", "kind": "functional", "signals": ["rst_n", "load", "enable", "count"]},
+      {"id": "REQ_SATURATING_NO_WRAP", "text": "The enabled transition from 254 reaches 255, and repeated enabled cycles at 255 hold 255 without wrapping to 0.", "kind": "invariant", "signals": ["enable", "count"]},
+      {"id": "REQ_SATURATED_COMBINATIONAL", "text": "saturated is combinational with zero-cycle latency and equals 1 exactly when count is 255, otherwise it equals 0.", "kind": "invariant", "signals": ["count", "saturated"], "latency_cycles": 0},
+      {"id": "REQ_LOAD_MAX_STATUS", "text": "Loading 255 sets count to 255 and causes saturated to assert combinationally.", "kind": "functional", "signals": ["load", "load_value", "count", "saturated"]},
+      {"id": "REQ_LOAD_BELOW_MAX_STATUS", "text": "Loading any value below 255 updates count and causes saturated to deassert combinationally.", "kind": "functional", "signals": ["load", "load_value", "count", "saturated"]}
+    ],
+    "directed_tests": [
+      {
+        "id": "TEST_SYNC_RESET_COMPETING_CONTROLS",
+        "description": "Load a nonzero value, assert synchronous reset while load and enable are both high, then verify normal operation resumes only on a later edge.",
+        "requirement_ids": ["REQ_SYNC_RESET_PRIORITY"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "load": 1, "enable": 0, "load_value": 37}},
+          {"drive": {"rst_n": 0, "load": 1, "enable": 1, "load_value": 199}},
+          {"drive": {"rst_n": 1, "load": 0, "enable": 0, "load_value": 0}}
+        ]
+      },
+      {
+        "id": "TEST_IDLE_AND_LOAD_PRIORITY",
+        "description": "Load with enable simultaneously high, hold the loaded value while idle, then increment normally.",
+        "requirement_ids": ["REQ_IDLE_HOLD", "REQ_LOAD_PRIORITY", "REQ_INCREMENT"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "load": 1, "enable": 1, "load_value": 85}},
+          {"drive": {"rst_n": 1, "load": 0, "enable": 0, "load_value": 0}, "repeat": 2},
+          {"drive": {"rst_n": 1, "load": 0, "enable": 1, "load_value": 0}, "repeat": 3}
+        ]
+      },
+      {
+        "id": "TEST_254_TO_255_AND_REPEATED_SATURATION",
+        "description": "Load 254, increment once to 255, and keep enable asserted for repeated cycles to prove saturation without wraparound.",
+        "requirement_ids": ["REQ_SATURATING_NO_WRAP", "REQ_SATURATED_COMBINATIONAL"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "load": 1, "enable": 0, "load_value": 254}},
+          {"drive": {"rst_n": 1, "load": 0, "enable": 1, "load_value": 0}},
+          {"drive": {"rst_n": 1, "load": 0, "enable": 1, "load_value": 0}, "repeat": 6}
+        ]
+      },
+      {
+        "id": "TEST_LOAD_MAX_THEN_CLEAR_STATUS",
+        "description": "Load 255 to assert saturated, then load a value below 255 to clear saturated, with load priority exercised on both edges.",
+        "requirement_ids": ["REQ_LOAD_PRIORITY", "REQ_SATURATED_COMBINATIONAL", "REQ_LOAD_MAX_STATUS", "REQ_LOAD_BELOW_MAX_STATUS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "load": 1, "enable": 1, "load_value": 255}},
+          {"drive": {"rst_n": 1, "load": 0, "enable": 0, "load_value": 0}},
+          {"drive": {"rst_n": 1, "load": 1, "enable": 1, "load_value": 23}},
+          {"drive": {"rst_n": 1, "load": 0, "enable": 0, "load_value": 0}}
+        ]
+      }
+    ],
+    "max_repair_rounds": 6,
+    "repair_candidates": 3,
+    "stagnation_limit": 2,
+    "trace_window_cycles": 4,
+    "max_counterexamples": 64,
+    "directed_test_budget": 32,
+    "random_regression_cycles": 300,
+    "oracle_coverage_target_pct": 85,
+    "oracle_coverage_rounds": 2,
+    "oracle_coverage_cycle_budget": 128,
+    "adaptive_tests_per_round": 4,
+    "adaptive_cycle_budget": 64,
+    "internal_trace_signals": 32,
+    "verilator_lint": true,
+    "formal_mode": "required",
+    "formal_depth": 32,
+    "formal_timeout_seconds": 120
+  }
+}

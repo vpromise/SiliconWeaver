@@ -1,0 +1,7 @@
+RTL-Closure
+Copyright 2026 RTL-Closure contributors
+
+The RTL-Closure inference control loop is an independently maintained
+implementation informed by concepts and public interfaces from ChipMATE,
+which was distributed under the Apache License, Version 2.0. RTL-Closure does
+not bundle, import, or require the ChipMATE runtime package.

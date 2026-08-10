@@ -1,0 +1,21 @@
+{
+  "name": "pi-lane-monitor-tests",
+  "version": "0.5.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "npm run check:syntax && npm run typecheck && npm test",
+    "check:syntax": "node --check extensions/lane-monitor-core.ts && node --check extensions/lane-monitor.ts",
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@earendil-works/pi-tui": "0.82.1",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  }
+}

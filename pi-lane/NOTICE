@@ -1,0 +1,5 @@
+Pi-Lane
+Copyright 2026 Pi-Lane contributors
+
+Pi-Lane interoperates with Pi and LibreLane through their public command and
+extension interfaces. Those projects are not bundled into this distribution.

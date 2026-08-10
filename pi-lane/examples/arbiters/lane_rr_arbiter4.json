@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "lane_rr_arbiter4",
+    "description": "Implement an unsigned four-requester round-robin arbiter named lane_rr_arbiter4 with one registered output buffer slot and the exact declared top-level port order. req_data maps requester 0 to bits 7:0, requester 1 to bits 15:8, requester 2 to bits 23:16, and requester 3 to bits 31:24. The hierarchy must instantiate all three required child modules from design.architecture: rr_select4 is purely combinational and performs explicit wrapped priority scanning in the order pointer, pointer+1, pointer+2, pointer+3; rr_output_hold owns the registered grant, out_valid, and out_data outputs and implements blocked stability and the mandatory post-transfer bubble; rr_pointer owns the two-bit priority pointer and updates it from the completed one-hot grant. rst_n is asynchronous and active-low and must clear grant, out_valid, out_data, every saved register, and set the next-priority pointer to requester 0. When out_valid is 0, a rising edge selects the first asserted req_valid bit in wrapped priority order and latches its one-hot grant and mapped byte into the output buffer, setting out_valid to 1. Selection cannot complete a transfer on the same edge even if out_ready is 1. If no request is valid, grant, out_valid, and out_data remain zero and the pointer does not change. While out_valid is 1 and out_ready is 0, grant, out_valid, out_data, and the pointer remain unchanged and all req_valid and req_data changes are ignored. A transfer completes only on a rising edge whose immediately preceding samples have out_valid and out_ready both 1. That edge advances the pointer to the requester after the completed one-hot grant and clears grant, out_valid, and out_data. A transfer edge cannot select another request, so the cleared out_valid state is a mandatory one-cycle bubble and arbitration can occur only on a subsequent rising edge. Except for reset forcing pointer zero, the pointer may change only on transfer completion and never on selection, blocking, or idle cycles. grant must be nonzero one-hot whenever out_valid is 1, and grant and out_data must both be zero whenever out_valid is 0. Use unsigned logic. Explicitly implement wraparound with case statements, comparisons, or finite addition/subtraction; do not use multiplication, division, or modulo operators. The implementation must be synthesizable and must not use initial blocks, declaration initialization, delays, force or release, DPI, file I/O, or system tasks.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1},
+      {"name": "rst_n", "direction": "input", "width": 1},
+      {"name": "req_valid", "direction": "input", "width": 4, "signed": false},
+      {"name": "req_data", "direction": "input", "width": 32, "signed": false},
+      {"name": "out_ready", "direction": "input", "width": 1},
+      {"name": "grant", "direction": "output", "width": 4, "signed": false},
+      {"name": "out_valid", "direction": "output", "width": 1},
+      {"name": "out_data", "direction": "output", "width": 8, "signed": false}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": true},
+    "architecture": {
+      "required_modules": ["rr_select4", "rr_output_hold", "rr_pointer"],
+      "forbidden_operators": ["multiply", "divide", "modulo"],
+      "min_sequential_bits": 15,
+      "max_sequential_bits": 40,
+      "max_synth_cells": 1200
+    }
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "floorplan_sizing": "relative",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "model": "gpt-5.6-sol",
+    "n": 4,
+    "max_turns": 5,
+    "num_verify_tests": 300,
+    "independent_verify_tests": 700,
+    "temperature": 0.3,
+    "seed": 404103,
+    "reasoning_effort": "xhigh"
+  },
+  "verification": {
+    "requirements": [
+      {
+        "id": "REQ_ASYNC_RESET_IDLE",
+        "text": "Asynchronous active-low rst_n immediately clears grant, out_valid, out_data, every saved register, and sets the two-bit next-priority pointer to requester 0. Continuous idle after reset preserves zero outputs and pointer 0.",
+        "kind": "reset",
+        "signals": ["rst_n", "req_valid", "out_ready", "grant", "out_valid", "out_data"]
+      },
+      {
+        "id": "REQ_WRAPPED_SELECTION_DATA",
+        "text": "When the output buffer is empty, the next rising edge scans req_valid in the explicit wrapped order pointer, pointer+1, pointer+2, pointer+3, selects the first valid requester, and latches the corresponding fixed req_data byte with its one-hot grant.",
+        "kind": "functional",
+        "signals": ["req_valid", "req_data", "grant", "out_valid", "out_data"]
+      },
+      {
+        "id": "REQ_NO_SELECTION_TRANSFER",
+        "text": "An empty-buffer selection edge only fills the registered output slot; it cannot also transfer or clear the selection even when out_ready is high on that edge.",
+        "kind": "protocol",
+        "signals": ["req_valid", "req_data", "out_ready", "grant", "out_valid", "out_data"]
+      },
+      {
+        "id": "REQ_BLOCKED_STABILITY",
+        "text": "Whenever the preceding samples have out_valid high and out_ready low, the next state preserves grant, out_valid, and out_data exactly and ignores all req_valid and req_data changes.",
+        "kind": "invariant",
+        "signals": ["req_valid", "req_data", "out_ready", "grant", "out_valid", "out_data"]
+      },
+      {
+        "id": "REQ_TRANSFER_BUBBLE_CLEAR",
+        "text": "A transfer occurs only when preceding out_valid and out_ready are both high. The transfer edge advances the pointer after the granted requester and clears grant, out_valid, and out_data without selecting a new request, producing the required empty-output bubble.",
+        "kind": "protocol",
+        "signals": ["req_valid", "req_data", "out_ready", "grant", "out_valid", "out_data"]
+      },
+      {
+        "id": "REQ_POINTER_UPDATE_ONLY_TRANSFER",
+        "text": "Except for asynchronous reset setting pointer to requester 0, the two-bit priority pointer changes only after a completed transfer to the requester following the completed one-hot grant; it is stable during selection, blocking, empty idle, and no-request cycles.",
+        "kind": "invariant",
+        "signals": ["rst_n", "req_valid", "out_ready", "grant", "out_valid"]
+      },
+      {
+        "id": "REQ_GRANT_OUTPUT_INVARIANTS",
+        "text": "Whenever out_valid is high, grant is nonzero and exactly one-hot. Whenever out_valid is low, grant and out_data are both zero.",
+        "kind": "invariant",
+        "signals": ["grant", "out_valid", "out_data"]
+      },
+      {
+        "id": "REQ_FAIR_ALL_REQUESTERS",
+        "text": "With all four requests continuously valid and each transfer accepted, grants repeat requester 0, 1, 2, 3 with a cleared out_valid bubble after every transfer and preserve the fixed data mapping 11, 22, 33, 44 hexadecimal.",
+        "kind": "functional",
+        "signals": ["req_valid", "req_data", "out_ready", "grant", "out_valid", "out_data"]
+      },
+      {
+        "id": "REQ_STALE_REQUEST_ISOLATION",
+        "text": "Withdrawing or changing requests while a selected output is blocked cannot cancel or replace that output. After it is accepted and cleared, only then may a later arbitration observe the new request set.",
+        "kind": "protocol",
+        "signals": ["req_valid", "req_data", "out_ready", "grant", "out_valid", "out_data"]
+      },
+      {
+        "id": "REQ_VERIFICATION_CLOSURE",
+        "text": "Cocotb directed tests, an independent randomized scoreboard regression, Verilator lint, frozen bounded trace formal checks, required universal temporal properties, Yosys checks, architecture audit, and synthesized-netlist equivalence must all pass; every counterexample must enter the bounded diagnosis, candidate repair, full regression, and rollback loop.",
+        "kind": "functional",
+        "signals": ["req_valid", "req_data", "out_ready", "grant", "out_valid", "out_data"]
+      }
+    ],
+    "directed_tests": [
+      {
+        "id": "TEST_ASYNC_RESET_AND_CONTINUOUS_IDLE",
+        "description": "First fill a nonzero selected output, then assert asynchronous rst_n low between normal operations and require immediate zero outputs and pointer reset to requester 0; deassert reset with no requests and hold continuous idle for six cycles.",
+        "requirement_ids": ["REQ_ASYNC_RESET_IDLE", "REQ_POINTER_UPDATE_ONLY_TRANSFER", "REQ_GRANT_OUTPUT_INVARIANTS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "req_valid": 8, "req_data": 1677721600, "out_ready": 0}},
+          {"drive": {"rst_n": 0, "req_valid": 15, "req_data": 4294967295, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 0, "out_ready": 0}, "repeat": 6}
+        ]
+      },
+      {
+        "id": "TEST_ALL_VALID_ROUND_ROBIN_WITH_BUBBLES",
+        "description": "Keep all four requests valid with bytes 11, 22, 33, 44 hexadecimal and out_ready continuously high. Observe at least two complete grant rounds 0,1,2,3,0,1,2,3; each selected valid cycle must be followed by a transfer edge that clears all outputs for one bubble cycle before the next selection.",
+        "requirement_ids": ["REQ_FAIR_ALL_REQUESTERS", "REQ_NO_SELECTION_TRANSFER", "REQ_TRANSFER_BUBBLE_CLEAR", "REQ_POINTER_UPDATE_ONLY_TRANSFER", "REQ_GRANT_OUTPUT_INVARIANTS", "REQ_VERIFICATION_CLOSURE"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "req_valid": 15, "req_data": 1144201745, "out_ready": 1}, "repeat": 17}
+        ]
+      },
+      {
+        "id": "TEST_REQUESTER2_BLOCKED_STABILITY",
+        "description": "Select requester 2 carrying A5 hexadecimal, hold out_ready low, then repeatedly change all request-valid bits and all data bytes and finally withdraw every request. The latched grant 0100 and data A5 must remain unchanged until readiness is asserted, then the old transfer clears all outputs.",
+        "requirement_ids": ["REQ_WRAPPED_SELECTION_DATA", "REQ_BLOCKED_STABILITY", "REQ_TRANSFER_BUBBLE_CLEAR", "REQ_STALE_REQUEST_ISOLATION"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "req_valid": 4, "req_data": 10813440, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "req_valid": 15, "req_data": 1144201745, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "req_valid": 1, "req_data": 3735928559, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 0, "out_ready": 0}, "repeat": 3},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 0, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 0, "out_ready": 1}}
+        ]
+      },
+      {
+        "id": "TEST_SPARSE_2_0_3_1_WRAP_ORDER",
+        "description": "Drive sparse request sets to force completed winners in the exact order requester 2, 0, 3, 1. After requester 2 advances pointer to 3, offer only requester 0 so scanning must cross the 3-to-0 boundary. Keep out_ready high and verify a cleared-output bubble between every pair of winners.",
+        "requirement_ids": ["REQ_WRAPPED_SELECTION_DATA", "REQ_NO_SELECTION_TRANSFER", "REQ_TRANSFER_BUBBLE_CLEAR", "REQ_POINTER_UPDATE_ONLY_TRANSFER"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "req_valid": 4, "req_data": 33488896, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 1, "req_data": 64, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 1, "req_data": 64, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 8, "req_data": 1342177280, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 8, "req_data": 1342177280, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 2, "req_data": 24576, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 2, "req_data": 24576, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 0, "out_ready": 1}}
+        ]
+      },
+      {
+        "id": "TEST_WITHDRAW_BLOCKED_THEN_NEW_ARBITRATION",
+        "description": "Select requester 1 with byte B1 while blocked, withdraw all requests for multiple cycles, then complete that old transfer. Keep the mandatory bubble clear, introduce only requester 3 afterward, and verify that only the new arbitration can produce requester 3 and its new byte D3.",
+        "requirement_ids": ["REQ_BLOCKED_STABILITY", "REQ_TRANSFER_BUBBLE_CLEAR", "REQ_STALE_REQUEST_ISOLATION", "REQ_GRANT_OUTPUT_INVARIANTS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "req_valid": 2, "req_data": 45312, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 0, "out_ready": 0}, "repeat": 3},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 0, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 8, "req_data": 3539992576, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 8, "req_data": 3539992576, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 0, "out_ready": 1}}
+        ]
+      },
+      {
+        "id": "TEST_NO_REQUEST_ZERO_OUTPUTS",
+        "description": "Across varied out_ready and arbitrary req_data values with req_valid zero, require grant, out_valid, and out_data to remain zero and ensure the pointer does not move; then select requester 0 to demonstrate idle data was never captured.",
+        "requirement_ids": ["REQ_ASYNC_RESET_IDLE", "REQ_POINTER_UPDATE_ONLY_TRANSFER", "REQ_GRANT_OUTPUT_INVARIANTS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 4294967295, "out_ready": 0}, "repeat": 3},
+          {"drive": {"rst_n": 1, "req_valid": 0, "req_data": 305419896, "out_ready": 1}, "repeat": 3},
+          {"drive": {"rst_n": 1, "req_valid": 1, "req_data": 90, "out_ready": 0}}
+        ]
+      }
+    ],
+    "max_repair_rounds": 8,
+    "repair_candidates": 4,
+    "stagnation_limit": 2,
+    "trace_window_cycles": 10,
+    "max_counterexamples": 128,
+    "directed_test_budget": 96,
+    "random_regression_cycles": 800,
+    "oracle_coverage_target_pct": 90,
+    "oracle_coverage_rounds": 3,
+    "oracle_coverage_cycle_budget": 320,
+    "adaptive_tests_per_round": 8,
+    "adaptive_cycle_budget": 160,
+    "internal_trace_signals": 64,
+    "verilator_lint": true,
+    "formal_mode": "required",
+    "formal_depth": 32,
+    "formal_timeout_seconds": 240,
+    "universal_mode": "required",
+    "universal_induction_depth": 8,
+    "universal_timeout_seconds": 240,
+    "universal_properties": [
+      {
+        "id": "PROP_BLOCKED_OUTPUTS_STABLE",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_BLOCKED_STABILITY"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"port": "out_valid", "at": "previous"},
+            {"op": "not", "arg": {"port": "out_ready", "at": "previous"}}
+          ]
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "out_valid", "at": "current"}, "right": {"const": 1, "width": 1}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"port": "grant", "at": "previous"}},
+            {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"port": "out_data", "at": "previous"}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_TRANSFER_CLEARS_OUTPUT_SLOT",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_TRANSFER_BUBBLE_CLEAR"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"port": "out_valid", "at": "previous"},
+            {"port": "out_ready", "at": "previous"}
+          ]
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "out_valid", "at": "current"}, "right": {"const": 0, "width": 1}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 0, "width": 4}},
+            {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"const": 0, "width": 8}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_INVALID_OUTPUTS_ZERO",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_GRANT_OUTPUT_INVARIANTS"],
+        "antecedent": {
+          "op": "eq",
+          "left": {"port": "out_valid", "at": "current"},
+          "right": {"const": 0, "width": 1}
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 0, "width": 4}},
+            {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"const": 0, "width": 8}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_VALID_GRANT_ONEHOT",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_GRANT_OUTPUT_INVARIANTS"],
+        "antecedent": {"port": "out_valid", "at": "current"},
+        "consequent": {
+          "op": "or",
+          "args": [
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 1, "width": 4}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 2, "width": 4}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 4, "width": 4}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 8, "width": 4}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_EMPTY_REQUEST_FILLS_SLOT",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_WRAPPED_SELECTION_DATA", "REQ_NO_SELECTION_TRANSFER"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "out_valid", "at": "previous"}, "right": {"const": 0, "width": 1}},
+            {"op": "ne", "left": {"port": "req_valid", "at": "previous"}, "right": {"const": 0, "width": 4}}
+          ]
+        },
+        "consequent": {
+          "op": "eq",
+          "left": {"port": "out_valid", "at": "current"},
+          "right": {"const": 1, "width": 1}
+        }
+      },
+      {
+        "id": "PROP_EMPTY_NO_REQUEST_STAYS_EMPTY",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_ASYNC_RESET_IDLE"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "out_valid", "at": "previous"}, "right": {"const": 0, "width": 1}},
+            {"op": "eq", "left": {"port": "req_valid", "at": "previous"}, "right": {"const": 0, "width": 4}}
+          ]
+        },
+        "consequent": {
+          "op": "eq",
+          "left": {"port": "out_valid", "at": "current"},
+          "right": {"const": 0, "width": 1}
+        }
+      }
+    ]
+  }
+}

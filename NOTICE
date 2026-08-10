@@ -1,0 +1,10 @@
+SiliconWeaver
+Copyright 2026 SiliconWeaver contributors
+
+This distribution contains the Pi-Lane and RTL-Closure components. Their
+component-level NOTICE files are included at `pi-lane/NOTICE` and
+`rtl-closure/NOTICE` and form part of this distribution's notices.
+
+SiliconWeaver interoperates with Pi and LibreLane through their public command,
+extension, and container interfaces. Those projects are not bundled into the
+Python distributions in this repository.

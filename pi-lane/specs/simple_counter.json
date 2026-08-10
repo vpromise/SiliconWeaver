@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "simple_counter",
+    "description": "Implement a synthesizable 4-bit unsigned synchronous up counter in Verilog. The top-level module must be named simple_counter and must exactly match the declared interface. All state updates occur on the rising edge of clk. Active-low synchronous reset rst_n has highest priority: when rst_n is sampled low, count becomes 0 regardless of enable. Otherwise, when enable is sampled high, count increments by one modulo 16, including automatic wrap from 15 to 0. When enable is sampled low, count holds its previous value. The registered count output reflects the updated state after the sampling edge and combinational settling. Reset has no asynchronous effect between clock edges.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1, "signed": false},
+      {"name": "rst_n", "direction": "input", "width": 1, "signed": false},
+      {"name": "enable", "direction": "input", "width": 1, "signed": false},
+      {"name": "count", "direction": "output", "width": 4, "signed": false}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": false},
+    "architecture": {}
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "mapped_equivalence_mode": "required",
+    "floorplan_sizing": "absolute",
+    "core_utilization": 40.0,
+    "place_density_pct": 60.0,
+    "die_area": [0.0, 0.0, 60.0, 60.0],
+    "core_area": [10.0, 10.0, 50.0, 50.0],
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "n": 3,
+    "max_turns": 4,
+    "num_verify_tests": 200,
+    "independent_verify_tests": 500,
+    "temperature": 0.3,
+    "seed": 4001,
+    "reasoning_effort": "xhigh"
+  },
+  "verification": {
+    "requirements": [
+      {
+        "id": "REQ_RESET",
+        "text": "A rising edge that samples rst_n low synchronously sets count to zero.",
+        "kind": "reset",
+        "signals": ["rst_n", "count"]
+      },
+      {
+        "id": "REQ_INCREMENT",
+        "text": "When a rising edge samples rst_n high and enable high, count increments by exactly one modulo 16 and the updated value is visible after that edge.",
+        "kind": "functional",
+        "signals": ["rst_n", "enable", "count"],
+        "latency_cycles": 0
+      },
+      {
+        "id": "REQ_WRAP",
+        "text": "When count is 15 and a rising edge samples rst_n high and enable high, count wraps to zero.",
+        "kind": "functional",
+        "signals": ["rst_n", "enable", "count"]
+      },
+      {
+        "id": "REQ_HOLD",
+        "text": "When a rising edge samples rst_n high and enable low, count holds its previous value.",
+        "kind": "invariant",
+        "signals": ["rst_n", "enable", "count"]
+      },
+      {
+        "id": "REQ_PRIORITY",
+        "text": "Synchronous reset has higher priority than enable, so a rising edge sampling rst_n low and enable high sets count to zero instead of incrementing.",
+        "kind": "protocol",
+        "signals": ["rst_n", "enable", "count"]
+      },
+      {
+        "id": "REQ_WIDTH",
+        "text": "count is an unsigned 4-bit registered output and therefore represents only values from 0 through 15.",
+        "kind": "invariant",
+        "signals": ["count"]
+      }
+    ],
+    "directed_tests": [
+      {
+        "id": "TEST_RESET_AND_IDLE_HOLD",
+        "description": "Apply the standard synchronous reset, then hold enable low for multiple cycles and require count to remain zero.",
+        "requirement_ids": ["REQ_RESET", "REQ_HOLD", "REQ_WIDTH"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "enable": 0}, "repeat": 4}
+        ]
+      },
+      {
+        "id": "TEST_CONSECUTIVE_INCREMENT",
+        "description": "Starting from reset, enable five consecutive increments, hold for two cycles, then increment once more.",
+        "requirement_ids": ["REQ_INCREMENT", "REQ_HOLD", "REQ_WIDTH"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "enable": 1}, "repeat": 5},
+          {"drive": {"rst_n": 1, "enable": 0}, "repeat": 2},
+          {"drive": {"rst_n": 1, "enable": 1}}
+        ]
+      },
+      {
+        "id": "TEST_WRAPAROUND",
+        "description": "Increment through the complete 4-bit range and beyond to observe 14, 15, 0, and 1 across the wrap boundary.",
+        "requirement_ids": ["REQ_INCREMENT", "REQ_WRAP", "REQ_WIDTH"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "enable": 1}, "repeat": 18}
+        ]
+      },
+      {
+        "id": "TEST_RESET_PRIORITY_AND_RECOVERY",
+        "description": "Increment to a nonzero value, assert synchronous reset while enable remains high, hold the reset value, then resume counting after reset deassertion.",
+        "requirement_ids": ["REQ_RESET", "REQ_PRIORITY", "REQ_INCREMENT", "REQ_HOLD"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "enable": 1}, "repeat": 3},
+          {"drive": {"rst_n": 0, "enable": 1}},
+          {"drive": {"rst_n": 1, "enable": 0}, "repeat": 2},
+          {"drive": {"rst_n": 1, "enable": 1}, "repeat": 2}
+        ]
+      }
+    ],
+    "max_repair_rounds": 6,
+    "repair_candidates": 3,
+    "stagnation_limit": 2,
+    "trace_window_cycles": 8,
+    "max_counterexamples": 64,
+    "directed_test_budget": 64,
+    "random_regression_cycles": 512,
+    "oracle_coverage_target_pct": 90,
+    "oracle_coverage_rounds": 3,
+    "oracle_coverage_cycle_budget": 256,
+    "oracle_line_coverage_mode": "advisory",
+    "oracle_diversity_mode": "advisory",
+    "oracle_min_distinct_sources": 2,
+    "adaptive_tests_per_round": 4,
+    "adaptive_cycle_budget": 128,
+    "internal_trace_signals": 32,
+    "formal_mode": "required",
+    "formal_depth": 32,
+    "formal_timeout_seconds": 240,
+    "formal_total_timeout_seconds": 3600,
+    "verilator_lint": true,
+    "universal_mode": "required",
+    "universal_induction_depth": 8,
+    "universal_timeout_seconds": 240,
+    "universal_properties": [
+      {
+        "id": "PROP_ENABLED_INCREMENT_OR_RESET",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_INCREMENT", "REQ_WRAP"],
+        "antecedent": {"port": "enable", "at": "previous"},
+        "consequent": {
+          "op": "or",
+          "args": [
+            {
+              "op": "eq",
+              "left": {"port": "count", "at": "current"},
+              "right": {"const": 0, "width": 4}
+            },
+            {
+              "op": "eq",
+              "left": {"port": "count", "at": "current"},
+              "right": {
+                "op": "add",
+                "left": {"port": "count", "at": "previous"},
+                "right": {"const": 1, "width": 4}
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "PROP_DISABLED_HOLD_OR_RESET",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_HOLD"],
+        "antecedent": {"op": "not", "arg": {"port": "enable", "at": "previous"}},
+        "consequent": {
+          "op": "or",
+          "args": [
+            {
+              "op": "eq",
+              "left": {"port": "count", "at": "current"},
+              "right": {"const": 0, "width": 4}
+            },
+            {
+              "op": "eq",
+              "left": {"port": "count", "at": "current"},
+              "right": {"port": "count", "at": "previous"}
+            }
+          ]
+        }
+      },
+      {
+        "id": "PROP_MAX_WRAPS_OR_HOLDS",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_WRAP", "REQ_HOLD"],
+        "antecedent": {
+          "op": "eq",
+          "left": {"port": "count", "at": "previous"},
+          "right": {"const": 15, "width": 4}
+        },
+        "consequent": {
+          "op": "or",
+          "args": [
+            {
+              "op": "eq",
+              "left": {"port": "count", "at": "current"},
+              "right": {"const": 0, "width": 4}
+            },
+            {
+              "op": "eq",
+              "left": {"port": "count", "at": "current"},
+              "right": {"const": 15, "width": 4}
+            }
+          ]
+        }
+      },
+      {
+        "id": "PROP_COUNT_WITHIN_WIDTH",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_WIDTH"],
+        "antecedent": {"const": 1, "width": 1},
+        "consequent": {
+          "op": "ule",
+          "left": {"port": "count", "at": "current"},
+          "right": {"const": 15, "width": 4}
+        }
+      }
+    ]
+  },
+  "intent_closure": {
+    "mode": "required",
+    "user_confirmed": true,
+    "unresolved_questions": [],
+    "assumptions": [
+      "All declared ports are unsigned, and count is the sole four-bit registered state visible at the top-level output.",
+      "Inputs are sampled immediately before each rising edge and count is checked after the edge and post-edge combinational settling.",
+      "Because reset is synchronous, changing rst_n between rising edges has no immediate effect; a low rst_n takes effect only when sampled at a rising edge.",
+      "No power-up value is assumed before reset, and every directed scenario begins with the controller-provided synchronous reset sequence.",
+      "All combinations of rst_n and enable within their declared widths are legal.",
+      "No required child modules, forbidden arithmetic operators, synthesized state-bit bounds, or synthesized cell-count limits are imposed.",
+      "LibreLane uses absolute floorplan sizing with die area [0, 0, 60, 60] um and core area [10, 10, 50, 50] um."
+    ],
+    "confirmed_sha256": "6ae37647f8a8aa30955c60b2f1b9b1ccd4cdbc703098f2369e05566637cef769"
+  }
+}

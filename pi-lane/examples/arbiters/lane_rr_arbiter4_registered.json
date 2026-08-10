@@ -1,0 +1,319 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "lane_rr_arbiter4",
+    "description": "Implement a synthesizable unsigned four-request registered round-robin arbiter named lane_rr_arbiter4 with the exact declared top-level port order. The top level must instantiate the three child modules required by design.architecture. rr_select4 is purely combinational and calculates the next winner from req and last_grant using explicit wrapped priority in the order last_grant+1, last_grant+2, last_grant+3, last_grant+4 over requester order 0,1,2,3,0. grant_register is sequential and exclusively owns the grant, grant_valid, and grant_index registers. arbiter_control is sequential and exclusively owns the two-bit last_grant register. rst_n is asynchronous active-low reset. Reset immediately clears grant and grant_valid, sets grant_index to zero, sets last_grant to 3, and clears any other saved state, so the first search starts at requester 0. All normal inputs are sampled immediately before a rising edge and registered outputs are observed immediately after it. When grant_valid is zero, inspect req at the rising edge. If req is nonzero, rr_select4 selects one requester beginning at last_grant+1 with wraparound and grant_register registers its one-hot grant, grant_valid=1, and matching grant_index. If req is zero, outputs remain grant=0, grant_valid=0, grant_index=0. While grant_valid is one and accept is zero, grant, grant_valid, grant_index, and last_grant remain exactly stable even when req changes or the selected request drops. A transaction is accepted only on an edge whose immediately preceding samples have grant_valid=1 and accept=1. On that edge arbiter_control updates last_grant to the accepted grant_index and grant_register clears grant, grant_valid, and grant_index. That accepted edge must not select or accept a replacement request. Arbitration may occur only on the following idle edge, creating one intentional cleared-output bubble. With all requests continuously asserted, accepted grants repeat 0,1,2,3. grant is exactly one-hot whenever grant_valid is one, and grant_index encodes its bit. The implementation must not use multiplication, division, modulo, initial blocks, declaration initialization, delays, force or release, DPI, file I/O, or system tasks.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1},
+      {"name": "rst_n", "direction": "input", "width": 1},
+      {"name": "req", "direction": "input", "width": 4, "signed": false},
+      {"name": "accept", "direction": "input", "width": 1},
+      {"name": "grant", "direction": "output", "width": 4, "signed": false},
+      {"name": "grant_valid", "direction": "output", "width": 1},
+      {"name": "grant_index", "direction": "output", "width": 2, "signed": false}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": true},
+    "architecture": {
+      "required_modules": ["rr_select4", "grant_register", "arbiter_control"],
+      "forbidden_operators": ["multiply", "divide", "modulo"],
+      "min_sequential_bits": 9,
+      "max_sequential_bits": 24,
+      "max_synth_cells": 700
+    }
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "floorplan_sizing": "relative",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "model": "gpt-5.6-sol",
+    "n": 4,
+    "max_turns": 5,
+    "num_verify_tests": 300,
+    "independent_verify_tests": 500,
+    "temperature": 0.3,
+    "seed": 404024,
+    "reasoning_effort": "xhigh"
+  },
+  "verification": {
+    "requirements": [
+      {
+        "id": "REQ_ASYNC_RESET",
+        "text": "Asynchronous active-low rst_n immediately clears grant and grant_valid, sets grant_index to zero, and sets internal last_grant to 3, including when asserted while a grant is active.",
+        "kind": "reset",
+        "signals": ["rst_n", "grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_IDLE_ZERO",
+        "text": "When grant_valid is zero and sampled req is zero, the next state remains grant=0, grant_valid=0, and grant_index=0.",
+        "kind": "invariant",
+        "signals": ["req", "grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_RR_SELECTION",
+        "text": "When idle with at least one sampled request, select exactly one requester by wrapped round-robin priority starting at last_grant+1 in order 0,1,2,3,0 and register its one-hot grant and matching index.",
+        "kind": "functional",
+        "signals": ["req", "grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_GRANT_ENCODING",
+        "text": "grant_valid low implies grant and grant_index are zero. grant_valid high implies grant is exactly one of 0001,0010,0100,1000 and grant_index encodes the asserted bit.",
+        "kind": "invariant",
+        "signals": ["grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_BACKPRESSURE_STABILITY",
+        "text": "A previously valid grant with accept low remains exactly stable in grant, grant_valid, and grant_index regardless of req changes or withdrawal of the selected request.",
+        "kind": "invariant",
+        "signals": ["req", "accept", "grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_ACCEPT_CLEAR_BUBBLE",
+        "text": "Only a preceding grant_valid=1 and accept=1 accepts a transaction. The acceptance edge updates last_grant to the accepted grant_index and clears grant, grant_valid, and grant_index without same-edge replacement; a later idle edge may arbitrate.",
+        "kind": "protocol",
+        "signals": ["req", "accept", "grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_LAST_GRANT_OWNERSHIP",
+        "text": "arbiter_control exclusively owns last_grant, resets it to 3, updates it to the accepted grant_index only after an accepted grant, and otherwise holds it stable.",
+        "kind": "invariant",
+        "signals": ["accept", "grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_FAIR_CONTINUOUS",
+        "text": "With req=1111 continuously asserted and every registered grant accepted, accepted grant indices repeat 0,1,2,3 with a cleared-output arbitration bubble after each acceptance.",
+        "kind": "functional",
+        "signals": ["req", "accept", "grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_ARCHITECTURE",
+        "text": "The top level instantiates combinational rr_select4, sequential grant_register owning all three outputs, and sequential arbiter_control owning last_grant; the generic synthesized result has 9 through 24 sequential bits, at most 700 cells, and no multiply, divide, or modulo operators.",
+        "kind": "functional",
+        "signals": ["req", "accept", "grant", "grant_valid", "grant_index"]
+      },
+      {
+        "id": "REQ_VERIFICATION_CLOSURE",
+        "text": "The frozen directed and randomized suites, historical counterexamples, two release randomized passes, RTL policy, exact interface, Cocotb and Icarus checks, Verilator lint, required bounded formal checks, required universal properties, Yosys checks, architecture audit, and synthesized-netlist equivalence must all pass before LibreLane publication.",
+        "kind": "functional",
+        "signals": ["req", "accept", "grant", "grant_valid", "grant_index"]
+      }
+    ],
+    "directed_tests": [
+      {
+        "id": "TEST_ASYNC_RESET_ACTIVE_AND_IDLE",
+        "description": "Select requester 3 while stalled, assert asynchronous rst_n low while that grant is active and require the defined idle outputs and last_grant=3 immediately, then deassert reset with req zero and remain idle.",
+        "requirement_ids": ["REQ_ASYNC_RESET", "REQ_IDLE_ZERO", "REQ_LAST_GRANT_OWNERSHIP", "REQ_GRANT_ENCODING"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "req": 8, "accept": 0}},
+          {"drive": {"rst_n": 0, "req": 15, "accept": 1}},
+          {"drive": {"rst_n": 1, "req": 0, "accept": 0}}
+        ]
+      },
+      {
+        "id": "TEST_IDLE_AND_EACH_REQUESTER",
+        "description": "Begin with a no-request idle cycle, then present each individual requester 0, 1, 2, and 3 in turn. For each, observe its registered one-hot grant and matching index, then accept it and observe cleared outputs before presenting the next requester.",
+        "requirement_ids": ["REQ_IDLE_ZERO", "REQ_RR_SELECTION", "REQ_GRANT_ENCODING", "REQ_ACCEPT_CLEAR_BUBBLE", "REQ_LAST_GRANT_OWNERSHIP"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"req": 0, "accept": 0}},
+          {"drive": {"req": 1, "accept": 0}},
+          {"drive": {"req": 1, "accept": 1}},
+          {"drive": {"req": 2, "accept": 0}},
+          {"drive": {"req": 2, "accept": 1}},
+          {"drive": {"req": 4, "accept": 0}},
+          {"drive": {"req": 4, "accept": 1}},
+          {"drive": {"req": 8, "accept": 0}},
+          {"drive": {"req": 8, "accept": 1}}
+        ]
+      },
+      {
+        "id": "TEST_SIMULTANEOUS_WRAPAROUND",
+        "description": "Use simultaneous sparse requests to prove wrapped priority. First select requester 2 from req=1100 after reset, accept it, then with last_grant=2 select requester 3 from req=1011, accept it, and with last_grant=3 select requester 0 from req=0011 across the 3-to-0 boundary.",
+        "requirement_ids": ["REQ_RR_SELECTION", "REQ_ACCEPT_CLEAR_BUBBLE", "REQ_LAST_GRANT_OWNERSHIP", "REQ_GRANT_ENCODING"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"req": 12, "accept": 0}},
+          {"drive": {"req": 11, "accept": 1}},
+          {"drive": {"req": 11, "accept": 0}},
+          {"drive": {"req": 3, "accept": 1}},
+          {"drive": {"req": 3, "accept": 0}},
+          {"drive": {"req": 0, "accept": 1}}
+        ]
+      },
+      {
+        "id": "TEST_CONTINUOUS_ALL_REQUESTS_ORDER",
+        "description": "Hold req=1111 and accept=1 continuously for eight edges. Registered selection and acceptance alternate, accepted grants are exactly 0,1,2,3, and each acceptance edge clears outputs without selecting a same-edge replacement.",
+        "requirement_ids": ["REQ_FAIR_CONTINUOUS", "REQ_ACCEPT_CLEAR_BUBBLE", "REQ_RR_SELECTION", "REQ_LAST_GRANT_OWNERSHIP", "REQ_ARCHITECTURE", "REQ_VERIFICATION_CLOSURE"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"req": 15, "accept": 1}, "repeat": 8}
+        ]
+      },
+      {
+        "id": "TEST_BACKPRESSURE_DROP_AND_NEXT_IDLE_SELECTION",
+        "description": "Select requester 1, stall while req changes to simultaneous requesters 0 and 3, then withdraw requester 1 entirely while still stalled. The original grant and index must remain stable. Accept it while requester 3 remains asserted and require cleared outputs with no replacement, then on the following idle edge select the still-asserted requester 3.",
+        "requirement_ids": ["REQ_BACKPRESSURE_STABILITY", "REQ_ACCEPT_CLEAR_BUBBLE", "REQ_RR_SELECTION", "REQ_LAST_GRANT_OWNERSHIP", "REQ_GRANT_ENCODING"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"req": 2, "accept": 0}},
+          {"drive": {"req": 9, "accept": 0}},
+          {"drive": {"req": 8, "accept": 0}},
+          {"drive": {"req": 8, "accept": 1}},
+          {"drive": {"req": 8, "accept": 0}}
+        ]
+      }
+    ],
+    "max_repair_rounds": 6,
+    "repair_candidates": 3,
+    "stagnation_limit": 2,
+    "trace_window_cycles": 10,
+    "max_counterexamples": 96,
+    "directed_test_budget": 36,
+    "random_regression_cycles": 300,
+    "oracle_coverage_target_pct": 90,
+    "oracle_coverage_rounds": 3,
+    "oracle_coverage_cycle_budget": 192,
+    "adaptive_tests_per_round": 6,
+    "adaptive_cycle_budget": 128,
+    "internal_trace_signals": 64,
+    "formal_mode": "required",
+    "formal_depth": 24,
+    "formal_timeout_seconds": 240,
+    "verilator_lint": true,
+    "universal_mode": "required",
+    "universal_induction_depth": 8,
+    "universal_timeout_seconds": 240,
+    "universal_properties": [
+      {
+        "id": "PROP_INVALID_OUTPUTS_ZERO",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_GRANT_ENCODING", "REQ_IDLE_ZERO", "REQ_ASYNC_RESET"],
+        "antecedent": {"op": "eq", "left": {"port": "grant_valid", "at": "current"}, "right": {"const": 0, "width": 1}},
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 0, "width": 4}},
+            {"op": "eq", "left": {"port": "grant_index", "at": "current"}, "right": {"const": 0, "width": 2}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_VALID_GRANT_ONEHOT",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_GRANT_ENCODING"],
+        "antecedent": {"port": "grant_valid", "at": "current"},
+        "consequent": {
+          "op": "or",
+          "args": [
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 1, "width": 4}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 2, "width": 4}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 4, "width": 4}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 8, "width": 4}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_GRANT0_INDEX0",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_GRANT_ENCODING"],
+        "antecedent": {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 1, "width": 4}},
+        "consequent": {"op": "eq", "left": {"port": "grant_index", "at": "current"}, "right": {"const": 0, "width": 2}}
+      },
+      {
+        "id": "PROP_GRANT1_INDEX1",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_GRANT_ENCODING"],
+        "antecedent": {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 2, "width": 4}},
+        "consequent": {"op": "eq", "left": {"port": "grant_index", "at": "current"}, "right": {"const": 1, "width": 2}}
+      },
+      {
+        "id": "PROP_GRANT2_INDEX2",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_GRANT_ENCODING"],
+        "antecedent": {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 4, "width": 4}},
+        "consequent": {"op": "eq", "left": {"port": "grant_index", "at": "current"}, "right": {"const": 2, "width": 2}}
+      },
+      {
+        "id": "PROP_GRANT3_INDEX3",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_GRANT_ENCODING"],
+        "antecedent": {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 8, "width": 4}},
+        "consequent": {"op": "eq", "left": {"port": "grant_index", "at": "current"}, "right": {"const": 3, "width": 2}}
+      },
+      {
+        "id": "PROP_UNACCEPTED_GRANT_STABLE",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_BACKPRESSURE_STABILITY"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"port": "grant_valid", "at": "previous"},
+            {"op": "not", "arg": {"port": "accept", "at": "previous"}}
+          ]
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "grant_valid", "at": "current"}, "right": {"const": 1, "width": 1}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"port": "grant", "at": "previous"}},
+            {"op": "eq", "left": {"port": "grant_index", "at": "current"}, "right": {"port": "grant_index", "at": "previous"}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_ACCEPTED_GRANT_CLEARS",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_ACCEPT_CLEAR_BUBBLE"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"port": "grant_valid", "at": "previous"},
+            {"port": "accept", "at": "previous"}
+          ]
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "grant_valid", "at": "current"}, "right": {"const": 0, "width": 1}},
+            {"op": "eq", "left": {"port": "grant", "at": "current"}, "right": {"const": 0, "width": 4}},
+            {"op": "eq", "left": {"port": "grant_index", "at": "current"}, "right": {"const": 0, "width": 2}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_IDLE_NO_REQUEST_STAYS_IDLE",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_IDLE_ZERO"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "grant_valid", "at": "previous"}, "right": {"const": 0, "width": 1}},
+            {"op": "eq", "left": {"port": "req", "at": "previous"}, "right": {"const": 0, "width": 4}}
+          ]
+        },
+        "consequent": {"op": "eq", "left": {"port": "grant_valid", "at": "current"}, "right": {"const": 0, "width": 1}}
+      },
+      {
+        "id": "PROP_IDLE_REQUEST_SELECTS",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_RR_SELECTION"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "grant_valid", "at": "previous"}, "right": {"const": 0, "width": 1}},
+            {"op": "ne", "left": {"port": "req", "at": "previous"}, "right": {"const": 0, "width": 4}}
+          ]
+        },
+        "consequent": {"op": "eq", "left": {"port": "grant_valid", "at": "current"}, "right": {"const": 1, "width": 1}}
+      }
+    ]
+  }
+}

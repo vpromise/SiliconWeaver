@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "nl_sat_counter",
+    "description": "Implement an 8-bit unsigned synchronous saturating up/down counter. On every rising edge of clk, apply this priority: (1) if rst_n is low, set count to 0; (2) otherwise if clear is high, set count to 0; (3) otherwise if enable is low, hold count; (4) otherwise if up is high, increment count by 1 only when count is less than 255, otherwise hold 255; (5) otherwise decrement count by 1 only when count is greater than 0, otherwise hold 0. rst_n is a synchronous active-low reset. The outputs at_min and at_max are combinational, with at_min equal to 1 exactly when count is 0 and at_max equal to 1 exactly when count is 255; they add no pipeline latency. Ports are clk (1-bit input), rst_n (1-bit input), clear (1-bit input), enable (1-bit input), up (1-bit input), count (8-bit unsigned output), at_min (1-bit output), and at_max (1-bit output). Do not use initial blocks, delay statements, vendor primitives, file I/O, or SystemVerilog DPI.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1},
+      {"name": "rst_n", "direction": "input", "width": 1},
+      {"name": "clear", "direction": "input", "width": 1},
+      {"name": "enable", "direction": "input", "width": 1},
+      {"name": "up", "direction": "input", "width": 1},
+      {"name": "count", "direction": "output", "width": 8},
+      {"name": "at_min", "direction": "output", "width": 1},
+      {"name": "at_max", "direction": "output", "width": 1}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": false}
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "floorplan_sizing": "absolute",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "die_area": [0, 0, 300, 300],
+    "core_area": [20, 20, 280, 280],
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "n": 3,
+    "max_turns": 3,
+    "num_verify_tests": 100,
+    "independent_verify_tests": 300,
+    "temperature": 0.4,
+    "seed": 42,
+    "reasoning_effort": "medium"
+  }
+}

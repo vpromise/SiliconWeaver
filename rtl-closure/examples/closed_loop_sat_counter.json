@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "lane_sat_counter",
+    "description": "Implement an 8-bit unsigned synchronous saturating counter. On each rising edge, active-low synchronous reset rst_n has highest priority and clears count to zero. Otherwise load has priority over enable and loads load_value exactly. Otherwise enable increments count by one unless count is already 255, in which case count remains 255. With neither load nor enable asserted, count holds. saturated is a combinational status output that is one exactly when count equals 255.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1},
+      {"name": "rst_n", "direction": "input", "width": 1},
+      {"name": "load", "direction": "input", "width": 1},
+      {"name": "enable", "direction": "input", "width": 1},
+      {"name": "load_value", "direction": "input", "width": 8},
+      {"name": "count", "direction": "output", "width": 8},
+      {"name": "saturated", "direction": "output", "width": 1}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": false}
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "floorplan_sizing": "relative",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "model": "gpt-5.6-sol",
+    "n": 3,
+    "max_turns": 3,
+    "num_verify_tests": 100,
+    "independent_verify_tests": 300,
+    "temperature": 0.4,
+    "seed": 42,
+    "reasoning_effort": "xhigh"
+  },
+  "verification": {
+    "requirements": [
+      {"id": "REQ_RESET", "text": "A sampled low rst_n clears count to zero with highest priority.", "kind": "reset", "signals": ["rst_n", "count"]},
+      {"id": "REQ_LOAD_PRIORITY", "text": "load writes load_value even when enable is also high.", "kind": "protocol", "signals": ["load", "enable", "load_value", "count"]},
+      {"id": "REQ_INCREMENT_HOLD", "text": "enable increments by one; otherwise count holds.", "kind": "functional", "signals": ["enable", "count"]},
+      {"id": "REQ_SATURATION", "text": "Incrementing 255 holds 255 and saturated is one exactly at 255.", "kind": "invariant", "signals": ["enable", "count", "saturated"]}
+    ],
+    "directed_tests": [
+      {
+        "id": "TEST_RESET_HOLD",
+        "description": "Reset the counter, then verify that an idle cycle holds the reset value.",
+        "requirement_ids": ["REQ_RESET"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"load": 0, "enable": 0, "load_value": 0}}
+        ]
+      },
+      {
+        "id": "TEST_LOAD_PRIORITY",
+        "description": "Load while enable is high, hold, then increment.",
+        "requirement_ids": ["REQ_LOAD_PRIORITY", "REQ_INCREMENT_HOLD"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"load": 1, "enable": 1, "load_value": 85}},
+          {"drive": {"load": 0, "enable": 0}},
+          {"drive": {"enable": 1}}
+        ]
+      },
+      {
+        "id": "TEST_SATURATION",
+        "description": "Reach 255, attempt another increment, then reload away from saturation.",
+        "requirement_ids": ["REQ_SATURATION", "REQ_LOAD_PRIORITY"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"load": 1, "enable": 0, "load_value": 254}},
+          {"drive": {"load": 0, "enable": 1}, "repeat": 2},
+          {"drive": {"load": 1, "enable": 1, "load_value": 7}}
+        ]
+      }
+    ],
+    "max_repair_rounds": 6,
+    "repair_candidates": 3,
+    "stagnation_limit": 2,
+    "trace_window_cycles": 4,
+    "max_counterexamples": 64,
+    "directed_test_budget": 32,
+    "random_regression_cycles": 300,
+    "oracle_coverage_target_pct": 85,
+    "oracle_coverage_rounds": 2,
+    "oracle_coverage_cycle_budget": 128,
+    "adaptive_tests_per_round": 4,
+    "adaptive_cycle_budget": 64,
+    "internal_trace_signals": 32,
+    "verilator_lint": true,
+    "formal_mode": "required",
+    "formal_depth": 32,
+    "formal_timeout_seconds": 120
+  }
+}

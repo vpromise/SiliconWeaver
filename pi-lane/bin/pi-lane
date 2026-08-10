@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+LINK_HOPS=0
+while [[ -L "$SOURCE" ]]; do
+  ((LINK_HOPS += 1))
+  if (( LINK_HOPS > 40 )); then
+    echo "pi-lane: launcher symlink chain is too deep or cyclic" >&2
+    exit 1
+  fi
+  SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd -P)"
+  LINK_TARGET="$(readlink -- "$SOURCE")"
+  if [[ "$LINK_TARGET" = /* ]]; then
+    SOURCE="$LINK_TARGET"
+  else
+    SOURCE="$SOURCE_DIR/$LINK_TARGET"
+  fi
+done
+if [[ ! -e "$SOURCE" ]]; then
+  echo "pi-lane: launcher symlink does not resolve to a file" >&2
+  exit 1
+fi
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd -P)"
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
+
+if [[ -n "${PI_LANE_PYTHON:-}" ]]; then
+  PYTHON="$PI_LANE_PYTHON"
+elif [[ -x "$ROOT/.venv/bin/python" ]]; then
+  PYTHON="$ROOT/.venv/bin/python"
+else
+  PYTHON="${PYTHON:-python3}"
+fi
+
+export PI_LANE_WORKSPACE="${PI_LANE_WORKSPACE:-$ROOT}"
+exec "$PYTHON" -m pi_lane.launcher "$@"

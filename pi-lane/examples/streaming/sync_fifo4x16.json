@@ -1,0 +1,409 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "sync_fifo4x16",
+    "description": "Implement a synthesizable SystemVerilog synchronous FIFO named sync_fifo4x16 with exactly four unsigned 16-bit entries and the exact declared top-level interface. All state changes occur only on rising edges of clk. rst_n is synchronous, active-low, and has highest priority. A rising edge that samples rst_n low clears the FIFO by setting all four 16-bit register-array entries, the 2-bit read pointer, 2-bit write pointer, 3-bit occupancy level, and dedicated 16-bit registered head_data to zero. The externally visible reset state is level=0, out_valid=0, out_data=16'h0000, and in_ready=1. Deasserting rst_n does not add a guard cycle: the first rising edge that samples rst_n high performs normal enqueue and dequeue transfers. Store all four FIFO entries in exactly one 4x16-bit register array addressed circularly by the pointers, synchronously clear every array entry to zero when rst_n is sampled low, and use exactly one additional 16-bit registered head_data as the stable output-head copy. Do not move all queued entries through a shift register. Define dequeue acceptance as out_valid && out_ready and enqueue acceptance as in_valid && in_ready. out_valid is one exactly when level is nonzero. out_data is head_data whenever nonempty and is zero whenever empty; there is no combinational fall-through or empty-queue bypass from in_data. in_ready is one whenever level is below four, and at level four remains one exactly when a dequeue is accepted in the same cycle. An accepted enqueue always writes in_data at the current write pointer and advances the 2-bit write pointer by natural binary wraparound without a modulo operator. An enqueue into a previously empty FIFO also loads head_data with in_data. An accepted dequeue removes the current oldest entry and advances the 2-bit read pointer by natural binary wraparound without a modulo operator. A dequeue from a prior level greater than one loads head_data from the next-oldest array entry at read_ptr plus one; a simultaneous dequeue and enqueue from a prior level of one loads head_data directly from in_data because that accepted input becomes the sole queued item; a dequeue-only operation from a prior level of one clears head_data to zero. Enqueue-only increments level, dequeue-only decrements level, simultaneous accepted enqueue and dequeue leave level unchanged while advancing both pointers, and no accepted operation preserves level and both pointers. When empty with in_valid=1 and out_ready=1, only enqueue can occur on that edge; out_valid and out_data must not expose the new input before the edge and become valid from the resulting post-edge state. When full with out_valid=1 and out_ready=1, an enqueue may be accepted on the same edge as the dequeue so sustained full-rate traffic transfers one item in each direction per cycle. While out_valid=1 and out_ready=0, out_valid, head_data, out_data, and the read pointer must remain stable; an independently accepted enqueue may update the array, write pointer, and occupancy without advancing or replacing the stalled head. Preserve strict first-in-first-out ordering through pointer wraparound and all simultaneous operations. Never overflow, underflow, lose, duplicate, or reorder accepted data. Use exactly one 4x16 register array, one 16-bit registered head_data, one 2-bit read pointer, one 2-bit write pointer, and one 3-bit occupancy counter. Do not use vendor IP, initial blocks, declaration initialization, delays, force or release, division, DPI, file I/O, system tasks, or other unsynthesizable constructs.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1, "signed": false},
+      {"name": "rst_n", "direction": "input", "width": 1, "signed": false},
+      {"name": "in_valid", "direction": "input", "width": 1, "signed": false},
+      {"name": "in_ready", "direction": "output", "width": 1, "signed": false},
+      {"name": "in_data", "direction": "input", "width": 16, "signed": false},
+      {"name": "out_valid", "direction": "output", "width": 1, "signed": false},
+      {"name": "out_ready", "direction": "input", "width": 1, "signed": false},
+      {"name": "out_data", "direction": "output", "width": 16, "signed": false},
+      {"name": "level", "direction": "output", "width": 3, "signed": false}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": false},
+    "architecture": {
+      "forbidden_operators": ["divide", "modulo"],
+      "min_sequential_bits": 87
+    }
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "mapped_equivalence_mode": "required",
+    "floorplan_sizing": "relative",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "model": "gpt-5.6-sol",
+    "n": 4,
+    "max_turns": 5,
+    "num_verify_tests": 300,
+    "independent_verify_tests": 500,
+    "temperature": 0.3,
+    "seed": 416016,
+    "reasoning_effort": "xhigh"
+  },
+  "verification": {
+    "requirements": [
+      {
+        "id": "REQ_RESET",
+        "text": "A rising edge sampling rst_n low has highest priority, clears all four 16-bit storage-array entries plus head_data, both pointers, and level to zero, and logically empties the FIFO. The visible reset state and the state before the first deasserted edge are level=0, out_valid=0, out_data=0, and in_ready=1; the first edge sampling rst_n high immediately permits normal transfer.",
+        "kind": "reset",
+        "signals": ["rst_n", "in_valid", "in_ready", "in_data", "out_valid", "out_ready", "out_data", "level"]
+      },
+      {
+        "id": "REQ_ENQUEUE",
+        "text": "A rising edge accepts in_data exactly when in_valid and in_ready are both one; rejected input must not change FIFO data or the write pointer.",
+        "kind": "protocol",
+        "signals": ["in_valid", "in_ready", "in_data", "level"]
+      },
+      {
+        "id": "REQ_DEQUEUE",
+        "text": "A rising edge removes the oldest entry exactly when out_valid and out_ready are both one; an empty FIFO cannot dequeue.",
+        "kind": "protocol",
+        "signals": ["out_valid", "out_ready", "out_data", "level"]
+      },
+      {
+        "id": "REQ_FIFO_ORDER",
+        "text": "All accepted 16-bit unsigned values are returned exactly once in strict first-in-first-out order across read-pointer and write-pointer wraparound, with no loss, duplication, or reordering.",
+        "kind": "functional",
+        "signals": ["in_valid", "in_ready", "in_data", "out_valid", "out_ready", "out_data", "level"]
+      },
+      {
+        "id": "REQ_OUTPUT_STATUS",
+        "text": "out_valid is one exactly when level is nonzero. When nonempty, out_data continuously presents the oldest queued entry; when empty, out_data is zero.",
+        "kind": "invariant",
+        "signals": ["out_valid", "out_data", "level"],
+        "latency_cycles": 0
+      },
+      {
+        "id": "REQ_BACKPRESSURE_STABILITY",
+        "text": "Whenever out_valid is one and out_ready is zero, out_valid and out_data remain stable until that item is accepted, and dequeue-side state does not advance during any length of backpressure.",
+        "kind": "invariant",
+        "signals": ["out_valid", "out_ready", "out_data", "level"]
+      },
+      {
+        "id": "REQ_READY_POLICY",
+        "text": "in_ready is one whenever level is below four. At level four it is one exactly when out_valid and out_ready cause a same-cycle dequeue; otherwise it is zero.",
+        "kind": "protocol",
+        "signals": ["in_valid", "in_ready", "out_valid", "out_ready", "level"],
+        "latency_cycles": 0
+      },
+      {
+        "id": "REQ_LEVEL_TRANSITIONS",
+        "text": "level always remains from zero through four inclusive; enqueue-only increments it, dequeue-only decrements it, simultaneous accepted enqueue and dequeue leave it unchanged, and no accepted transfer leaves it unchanged.",
+        "kind": "invariant",
+        "signals": ["in_valid", "in_ready", "out_valid", "out_ready", "level"]
+      },
+      {
+        "id": "REQ_EMPTY_NO_BYPASS",
+        "text": "When empty with in_valid=1 and out_ready=1, the current cycle cannot dequeue or combinationally expose in_data. The edge enqueues the item, and out_valid with that item appears only in the post-edge state.",
+        "kind": "latency",
+        "signals": ["in_valid", "in_ready", "in_data", "out_valid", "out_ready", "out_data", "level"],
+        "latency_cycles": 1
+      },
+      {
+        "id": "REQ_FULL_SIMULTANEOUS",
+        "text": "When full and a dequeue succeeds, in_ready remains one so an asserted in_valid is accepted on the same edge; the previous head is removed, the new value becomes the newest tail, and level remains four.",
+        "kind": "functional",
+        "signals": ["in_valid", "in_ready", "in_data", "out_valid", "out_ready", "out_data", "level"]
+      },
+      {
+        "id": "REQ_NO_ILLEGAL_TRANSFER",
+        "text": "The FIFO never overflows or underflows: full input without a successful dequeue is rejected, empty output requests remove nothing, and rejected operations cannot corrupt pointers, occupancy, or queued data.",
+        "kind": "invariant",
+        "signals": ["in_valid", "in_ready", "out_valid", "out_ready", "out_data", "level"]
+      },
+      {
+        "id": "REQ_SUSTAINED_THROUGHPUT",
+        "text": "After filling, continuous in_valid and out_ready sustain one accepted dequeue and one accepted enqueue on every rising edge while preserving order and constant occupancy.",
+        "kind": "functional",
+        "signals": ["in_valid", "in_ready", "in_data", "out_valid", "out_ready", "out_data", "level"]
+      }
+    ],
+    "directed_tests": [
+      {
+        "id": "TEST_RESET_AND_FIRST_RELEASE_EDGE",
+        "description": "Create nonempty state, assert synchronous reset while requests are active, then deassert reset with in_valid high to exercise immediate normal transfer on the first released edge.",
+        "requirement_ids": ["REQ_RESET", "REQ_ENQUEUE", "REQ_OUTPUT_STATUS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 4369, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 8738, "out_ready": 0}},
+          {"drive": {"rst_n": 0, "in_valid": 1, "in_data": 13107, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 17476, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_SINGLE_ENQUEUE_DEQUEUE",
+        "description": "Accept one patterned word, hold it for one cycle, dequeue it, and issue additional empty output requests without corrupting state.",
+        "requirement_ids": ["REQ_ENQUEUE", "REQ_DEQUEUE", "REQ_FIFO_ORDER", "REQ_NO_ILLEGAL_TRANSFER"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"in_valid": 1, "in_data": 42330, "out_ready": 0}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 0}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 1}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 1}, "repeat": 3}
+        ]
+      },
+      {
+        "id": "TEST_EMPTY_SIMULTANEOUS_NO_BYPASS",
+        "description": "From empty, assert in_valid and out_ready together, retain the resulting item without accepting it for a cycle, then dequeue it later.",
+        "requirement_ids": ["REQ_EMPTY_NO_BYPASS", "REQ_OUTPUT_STATUS", "REQ_LEVEL_TRANSITIONS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"in_valid": 1, "in_data": 57005, "out_ready": 1}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 0}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 1}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_FILL_BLOCK_AND_FULL_SIMULTANEOUS",
+        "description": "Fill all four slots with distinct values, attempt blocked input while full, then perform full-state simultaneous dequeue/enqueue and drain the resulting queue in order.",
+        "requirement_ids": ["REQ_READY_POLICY", "REQ_FULL_SIMULTANEOUS", "REQ_FIFO_ORDER", "REQ_LEVEL_TRANSITIONS", "REQ_NO_ILLEGAL_TRANSFER"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"in_valid": 1, "in_data": 4097, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 8194, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 12291, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 16388, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 20485, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 24582, "out_ready": 1}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 1}, "repeat": 4},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_LONG_BACKPRESSURE",
+        "description": "Queue multiple distinct words, hold out_ready low for a long interval while varying input requests, and then drain in exact order.",
+        "requirement_ids": ["REQ_BACKPRESSURE_STABILITY", "REQ_FIFO_ORDER", "REQ_LEVEL_TRANSITIONS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"in_valid": 1, "in_data": 4951, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 9320, "out_ready": 0}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 0}, "repeat": 24},
+          {"drive": {"in_valid": 1, "in_data": 65535, "out_ready": 0}},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 0}, "repeat": 8},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 1}, "repeat": 3}
+        ]
+      },
+      {
+        "id": "TEST_POINTER_WRAP_AND_SUSTAINED_THROUGHPUT",
+        "description": "Preload four distinct words and sustain simultaneous input and output long enough for both two-bit pointers to wrap repeatedly, then drain and verify all accepted values end to end.",
+        "requirement_ids": ["REQ_FIFO_ORDER", "REQ_FULL_SIMULTANEOUS", "REQ_SUSTAINED_THROUGHPUT", "REQ_LEVEL_TRANSITIONS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"in_valid": 1, "in_data": 257, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 514, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 771, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 1028, "out_ready": 0}},
+          {"drive": {"in_valid": 1, "in_data": 42405, "out_ready": 1}, "repeat": 40},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 1}, "repeat": 4},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_CONTINUOUS_INPUT_THEN_OUTPUT",
+        "description": "Apply continuous input across empty, partial, and full states, then continuous output through nonempty and empty states.",
+        "requirement_ids": ["REQ_ENQUEUE", "REQ_DEQUEUE", "REQ_READY_POLICY", "REQ_NO_ILLEGAL_TRANSFER", "REQ_SUSTAINED_THROUGHPUT"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"in_valid": 1, "in_data": 3855, "out_ready": 0}, "repeat": 12},
+          {"drive": {"in_valid": 1, "in_data": 61680, "out_ready": 1}, "repeat": 16},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 1}, "repeat": 12},
+          {"drive": {"in_valid": 0, "in_data": 0, "out_ready": 0}}
+        ]
+      }
+    ],
+    "max_repair_rounds": 8,
+    "repair_candidates": 4,
+    "stagnation_limit": 2,
+    "trace_window_cycles": 12,
+    "max_counterexamples": 128,
+    "directed_test_budget": 192,
+    "random_regression_cycles": 300,
+    "oracle_coverage_target_pct": 90,
+    "oracle_coverage_rounds": 4,
+    "oracle_coverage_cycle_budget": 512,
+    "oracle_line_coverage_mode": "advisory",
+    "oracle_diversity_mode": "advisory",
+    "oracle_min_distinct_sources": 2,
+    "adaptive_tests_per_round": 8,
+    "adaptive_cycle_budget": 256,
+    "internal_trace_signals": 96,
+    "formal_mode": "required",
+    "formal_depth": 16,
+    "formal_timeout_seconds": 900,
+    "verilator_lint": true,
+    "universal_mode": "required",
+    "universal_induction_depth": 8,
+    "universal_timeout_seconds": 240,
+    "universal_properties": [
+      {
+        "id": "PROP_LEVEL_AT_MOST_FOUR",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_LEVEL_TRANSITIONS", "REQ_NO_ILLEGAL_TRANSFER"],
+        "antecedent": {"const": 1, "width": 1},
+        "consequent": {"op": "ule", "left": {"port": "level", "at": "current"}, "right": {"const": 4, "width": 3}}
+      },
+      {
+        "id": "PROP_EMPTY_IMPLIES_OUT_INVALID",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_OUTPUT_STATUS", "REQ_EMPTY_NO_BYPASS"],
+        "antecedent": {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"const": 0, "width": 3}},
+        "consequent": {"op": "eq", "left": {"port": "out_valid", "at": "current"}, "right": {"const": 0, "width": 1}}
+      },
+      {
+        "id": "PROP_NONEMPTY_IMPLIES_OUT_VALID",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_OUTPUT_STATUS"],
+        "antecedent": {"op": "ugt", "left": {"port": "level", "at": "current"}, "right": {"const": 0, "width": 3}},
+        "consequent": {"op": "eq", "left": {"port": "out_valid", "at": "current"}, "right": {"const": 1, "width": 1}}
+      },
+      {
+        "id": "PROP_EMPTY_DATA_IS_ZERO",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_OUTPUT_STATUS", "REQ_RESET"],
+        "antecedent": {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"const": 0, "width": 3}},
+        "consequent": {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"const": 0, "width": 16}}
+      },
+      {
+        "id": "PROP_STALLED_OUT_VALID_HELD",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_BACKPRESSURE_STABILITY"],
+        "antecedent": {"op": "and", "args": [
+          {"port": "out_valid", "at": "previous"},
+          {"op": "not", "arg": {"port": "out_ready", "at": "previous"}}
+        ]},
+        "consequent": {"port": "out_valid", "at": "current"}
+      },
+      {
+        "id": "PROP_STALLED_OUT_DATA_STABLE",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_BACKPRESSURE_STABILITY"],
+        "antecedent": {"op": "and", "args": [
+          {"port": "out_valid", "at": "previous"},
+          {"op": "not", "arg": {"port": "out_ready", "at": "previous"}}
+        ]},
+        "consequent": {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"port": "out_data", "at": "previous"}}
+      },
+      {
+        "id": "PROP_NONFULL_READY",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_READY_POLICY"],
+        "antecedent": {"op": "ult", "left": {"port": "level", "at": "current"}, "right": {"const": 4, "width": 3}},
+        "consequent": {"port": "in_ready", "at": "current"}
+      },
+      {
+        "id": "PROP_FULL_POP_READY",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_READY_POLICY", "REQ_FULL_SIMULTANEOUS"],
+        "antecedent": {"op": "and", "args": [
+          {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"const": 4, "width": 3}},
+          {"port": "out_valid", "at": "current"},
+          {"port": "out_ready", "at": "current"}
+        ]},
+        "consequent": {"port": "in_ready", "at": "current"}
+      },
+      {
+        "id": "PROP_FULL_NO_POP_NOT_READY",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_READY_POLICY", "REQ_NO_ILLEGAL_TRANSFER"],
+        "antecedent": {"op": "and", "args": [
+          {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"const": 4, "width": 3}},
+          {"op": "not", "arg": {"op": "and", "args": [
+            {"port": "out_valid", "at": "current"},
+            {"port": "out_ready", "at": "current"}
+          ]}}
+        ]},
+        "consequent": {"op": "eq", "left": {"port": "in_ready", "at": "current"}, "right": {"const": 0, "width": 1}}
+      },
+      {
+        "id": "PROP_ENQUEUE_ONLY_INCREMENTS_LEVEL",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_ENQUEUE", "REQ_LEVEL_TRANSITIONS"],
+        "antecedent": {"op": "and", "args": [
+          {"port": "in_valid", "at": "previous"},
+          {"port": "in_ready", "at": "previous"},
+          {"op": "not", "arg": {"op": "and", "args": [
+            {"port": "out_valid", "at": "previous"},
+            {"port": "out_ready", "at": "previous"}
+          ]}}
+        ]},
+        "consequent": {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"op": "add", "left": {"port": "level", "at": "previous"}, "right": {"const": 1, "width": 3}}}
+      },
+      {
+        "id": "PROP_DEQUEUE_ONLY_DECREMENTS_LEVEL",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_DEQUEUE", "REQ_LEVEL_TRANSITIONS"],
+        "antecedent": {"op": "and", "args": [
+          {"port": "out_valid", "at": "previous"},
+          {"port": "out_ready", "at": "previous"},
+          {"op": "not", "arg": {"op": "and", "args": [
+            {"port": "in_valid", "at": "previous"},
+            {"port": "in_ready", "at": "previous"}
+          ]}}
+        ]},
+        "consequent": {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"op": "sub", "left": {"port": "level", "at": "previous"}, "right": {"const": 1, "width": 3}}}
+      },
+      {
+        "id": "PROP_SIMULTANEOUS_KEEPS_LEVEL",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_LEVEL_TRANSITIONS", "REQ_FULL_SIMULTANEOUS", "REQ_SUSTAINED_THROUGHPUT"],
+        "antecedent": {"op": "and", "args": [
+          {"port": "in_valid", "at": "previous"},
+          {"port": "in_ready", "at": "previous"},
+          {"port": "out_valid", "at": "previous"},
+          {"port": "out_ready", "at": "previous"}
+        ]},
+        "consequent": {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"port": "level", "at": "previous"}}
+      },
+      {
+        "id": "PROP_NO_TRANSFER_KEEPS_LEVEL",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_LEVEL_TRANSITIONS", "REQ_NO_ILLEGAL_TRANSFER"],
+        "antecedent": {"op": "and", "args": [
+          {"op": "not", "arg": {"op": "and", "args": [
+            {"port": "in_valid", "at": "previous"},
+            {"port": "in_ready", "at": "previous"}
+          ]}},
+          {"op": "not", "arg": {"op": "and", "args": [
+            {"port": "out_valid", "at": "previous"},
+            {"port": "out_ready", "at": "previous"}
+          ]}}
+        ]},
+        "consequent": {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"port": "level", "at": "previous"}}
+      },
+      {
+        "id": "PROP_EMPTY_ENQUEUE_VISIBLE_NEXT_STATE",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_EMPTY_NO_BYPASS", "REQ_ENQUEUE"],
+        "antecedent": {"op": "and", "args": [
+          {"op": "eq", "left": {"port": "level", "at": "previous"}, "right": {"const": 0, "width": 3}},
+          {"port": "in_valid", "at": "previous"},
+          {"port": "in_ready", "at": "previous"}
+        ]},
+        "consequent": {"op": "and", "args": [
+          {"port": "out_valid", "at": "current"},
+          {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"port": "in_data", "at": "previous"}},
+          {"op": "eq", "left": {"port": "level", "at": "current"}, "right": {"const": 1, "width": 3}}
+        ]}
+      }
+    ]
+  },
+  "intent_closure": {
+    "mode": "required",
+    "user_confirmed": true,
+    "unresolved_questions": [],
+    "assumptions": [
+      "Inputs are sampled immediately before each rising edge and outputs are checked after post-edge combinational settling.",
+      "Because reset is synchronous, rst_n becoming low does not change state until a rising edge samples it low; the required reset outputs are observed after that edge.",
+      "The first rising edge sampling rst_n high after reset deassertion performs normal enqueue and dequeue logic without an extra guard cycle.",
+      "Each rising edge sampling rst_n low synchronously resets all four 16-bit storage-array entries and the registered head_data to zero in addition to resetting both pointers and level.",
+      "The dedicated registered head_data is a copy of the oldest queued array entry, is loaded directly on an enqueue into empty, is advanced on a successful dequeue when data remains, and is never modified by an independent enqueue into a nonempty FIFO.",
+      "All input combinations within the declared unsigned widths are legal, and in_data is semantically ignored unless enqueue is accepted."
+    ],
+    "confirmed_sha256": "7e7338863d04d01f4ce51c040f6f6433d7b58af824809f4f4d7493948cab1bec"
+  }
+}

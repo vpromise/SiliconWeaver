@@ -1,0 +1,355 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "lane_stream32_to8",
+    "description": "Implement a synthesizable unsigned 32-bit-input to 8-bit-output streaming serializer named lane_stream32_to8 with the exact declared top-level port order and one buffered input word. rst_n is asynchronous active-low reset and must clear every saved state bit, make in_ready 1, and make out_valid, out_data, and out_last zero. Instantiate all three required child modules from design.architecture exactly once or more: keep_scanner4 is combinational logic that finds the lowest numbered set keep bit strictly after the current byte position; word_buffer owns registered copies of accepted in_data, in_keep, and in_last; byte_stream_control manages the occupied state, current byte position, in_ready, out_valid, output selection, and transfer transitions. in_ready is 1 only when no nonempty input word is buffered. An input transfer occurs from samples immediately before a rising edge when in_valid and in_ready are both 1. Acceptance of nonzero in_keep latches the complete word and starts output at the lowest numbered set keep bit after that edge; the acceptance edge is never an output transfer. Byte mapping is fixed: keep bit 0 selects data bits 7:0, bit 1 selects 15:8, bit 2 selects 23:16, and bit 3 selects 31:24. Emit only set keep positions in strict order 0,1,2,3. An output transfer occurs from samples immediately before a rising edge when out_valid and out_ready are both 1. If a later set keep bit exists, that edge advances directly to it and keeps out_valid asserted without a bubble. If no later set bit exists, that edge clears the buffer and clears out_valid, out_data, and out_last. Because in_ready was 0 before that final transfer edge, a new input cannot be accepted on that edge and may only be accepted on a later edge where in_ready was sampled high. out_last is 1 only when the buffered in_last is 1 and the currently presented byte is the last set keep position; it is zero for every earlier byte and for every byte from an input with in_last 0. While out_valid is 1 and out_ready is 0, out_valid, out_data, out_last, all buffered state, and the current position remain unchanged; in_ready remains 0 and all changes on input payload signals are ignored. A transfer with in_keep equal to zero is legal but is discarded on the acceptance edge, produces no output, leaves the module empty, and keeps out_valid, out_data, and out_last zero. Whenever out_valid is zero, out_data and out_last are zero. Whenever out_last is one, out_valid is one. Byte selection must use case statements, shifts, or explicit multiplexing. Do not use multiplication, division, or modulo operators. Do not use initial blocks, declaration initialization, delays, force or release, DPI, file I/O, or system tasks.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1},
+      {"name": "rst_n", "direction": "input", "width": 1},
+      {"name": "in_valid", "direction": "input", "width": 1},
+      {"name": "in_ready", "direction": "output", "width": 1},
+      {"name": "in_data", "direction": "input", "width": 32, "signed": false},
+      {"name": "in_keep", "direction": "input", "width": 4, "signed": false},
+      {"name": "in_last", "direction": "input", "width": 1},
+      {"name": "out_valid", "direction": "output", "width": 1},
+      {"name": "out_ready", "direction": "input", "width": 1},
+      {"name": "out_data", "direction": "output", "width": 8, "signed": false},
+      {"name": "out_last", "direction": "output", "width": 1}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": true},
+    "architecture": {
+      "required_modules": ["keep_scanner4", "word_buffer", "byte_stream_control"],
+      "forbidden_operators": ["multiply", "divide", "modulo"],
+      "min_sequential_bits": 40,
+      "max_sequential_bits": 96,
+      "max_synth_cells": 1800
+    }
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "floorplan_sizing": "relative",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "model": "gpt-5.6-sol",
+    "n": 4,
+    "max_turns": 5,
+    "num_verify_tests": 300,
+    "independent_verify_tests": 700,
+    "temperature": 0.3,
+    "seed": 532801,
+    "reasoning_effort": "xhigh"
+  },
+  "verification": {
+    "requirements": [
+      {
+        "id": "REQ_ASYNC_RESET_IDLE",
+        "text": "Asynchronous active-low reset immediately clears all internal state, sets in_ready to one, and clears out_valid, out_data, and out_last. Empty idle cycles preserve these values.",
+        "kind": "reset",
+        "signals": ["rst_n", "in_ready", "out_valid", "out_data", "out_last"]
+      },
+      {
+        "id": "REQ_ACCEPT_BUFFER",
+        "text": "Only an edge preceded by in_valid and in_ready both high accepts an input. A nonzero keep word is fully latched and first becomes visible as output after that edge; acceptance is not an output transfer.",
+        "kind": "protocol",
+        "signals": ["in_valid", "in_ready", "in_data", "in_keep", "in_last", "out_valid", "out_data", "out_last"]
+      },
+      {
+        "id": "REQ_BYTE_ORDER_MAPPING",
+        "text": "Set keep positions are emitted exactly once in ascending position order with fixed little-endian lane mapping keep 0 to data 7:0, keep 1 to 15:8, keep 2 to 23:16, and keep 3 to 31:24.",
+        "kind": "functional",
+        "signals": ["in_data", "in_keep", "out_valid", "out_ready", "out_data"]
+      },
+      {
+        "id": "REQ_SPARSE_KEEP_SKIP",
+        "text": "Every clear keep position is skipped without output while every set keep position is emitted in ascending order.",
+        "kind": "functional",
+        "signals": ["in_keep", "out_valid", "out_ready", "out_data"]
+      },
+      {
+        "id": "REQ_BACKPRESSURE_STABILITY",
+        "text": "When preceding out_valid is one and out_ready is zero, out_valid, out_data, and out_last remain exactly stable, in_ready remains zero, and all current input signal changes are ignored.",
+        "kind": "invariant",
+        "signals": ["in_valid", "in_ready", "in_data", "in_keep", "in_last", "out_valid", "out_ready", "out_data", "out_last"]
+      },
+      {
+        "id": "REQ_NO_BUBBLE_WITHIN_WORD",
+        "text": "After a nonfinal valid byte transfers, the next set keep position is presented immediately after that edge with out_valid continuously high and no empty cycle between bytes.",
+        "kind": "protocol",
+        "signals": ["out_valid", "out_ready", "out_data", "out_last"]
+      },
+      {
+        "id": "REQ_FINAL_CLEAR_NO_REPLACE",
+        "text": "Transferring the final set byte clears the complete buffer and all output signals. Since in_ready was zero before that edge, no replacement input can be accepted on the same edge; acceptance is possible only on a subsequent ready edge.",
+        "kind": "protocol",
+        "signals": ["in_valid", "in_ready", "in_data", "in_keep", "in_last", "out_valid", "out_ready", "out_data", "out_last"]
+      },
+      {
+        "id": "REQ_LAST_SEMANTICS",
+        "text": "out_last is asserted exactly on the final set keep position when and only when the buffered input had in_last asserted. It is clear on earlier bytes and throughout words accepted with in_last zero.",
+        "kind": "functional",
+        "signals": ["in_last", "out_valid", "out_ready", "out_last"]
+      },
+      {
+        "id": "REQ_ZERO_KEEP_DROP",
+        "text": "An empty module accepts in_keep zero when in_valid is high, discards it immediately, remains ready, and produces no output at any time from that transfer.",
+        "kind": "functional",
+        "signals": ["in_valid", "in_ready", "in_data", "in_keep", "in_last", "out_valid", "out_data", "out_last"]
+      },
+      {
+        "id": "REQ_OUTPUT_INVARIANTS",
+        "text": "out_last high always implies out_valid high. out_valid low always implies out_data and out_last are zero and the single input slot is ready.",
+        "kind": "invariant",
+        "signals": ["in_ready", "out_valid", "out_data", "out_last"]
+      },
+      {
+        "id": "REQ_ARCHITECTURE_POLICY",
+        "text": "The final RTL instantiates keep_scanner4, word_buffer, and byte_stream_control, contains 40 through 96 sequential bits, uses no multiply, divide, or modulo operator, selects bytes explicitly, and synthesizes to at most 1800 generic cells.",
+        "kind": "functional",
+        "signals": ["in_data", "in_keep", "in_ready", "out_valid", "out_data", "out_last"]
+      },
+      {
+        "id": "REQ_VERIFICATION_CLOSURE",
+        "text": "Cocotb directed tests, at least two independent randomized regressions, Verilator lint, complete frozen bounded trace checks, required universal properties, Yosys checks, architecture audit, and synthesized-netlist equivalence must pass. Every failure must enter diagnosis, candidate repair, complete regression, historical counterexample replay, and failed-candidate rollback.",
+        "kind": "functional",
+        "signals": ["in_valid", "in_ready", "in_data", "in_keep", "in_last", "out_valid", "out_ready", "out_data", "out_last"]
+      }
+    ],
+    "directed_tests": [
+      {
+        "id": "TEST_ASYNC_RESET_AND_IDLE",
+        "description": "Accept a nonzero word while blocked so outputs and internal state are nonzero, then assert rst_n low asynchronously and require in_ready one with out_valid, out_data, and out_last all zero. Deassert reset with no valid input and check six empty idle cycles.",
+        "requirement_ids": ["REQ_ASYNC_RESET_IDLE", "REQ_OUTPUT_INVARIANTS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 1144201745, "in_keep": 15, "in_last": 1, "out_ready": 0}},
+          {"drive": {"rst_n": 0, "in_valid": 1, "in_data": 4294967295, "in_keep": 15, "in_last": 1, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 0}, "repeat": 6}
+        ]
+      },
+      {
+        "id": "TEST_FULL_KEEP_44332211",
+        "description": "Accept data 44332211 hexadecimal with keep 1111 and last one, then keep out_ready high. Require output bytes 11, 22, 33, 44 hexadecimal on consecutive valid cycles with no bubbles, with out_last zero for the first three and one only with 44, followed by cleared outputs and readiness.",
+        "requirement_ids": ["REQ_ACCEPT_BUFFER", "REQ_BYTE_ORDER_MAPPING", "REQ_NO_BUBBLE_WITHIN_WORD", "REQ_FINAL_CLEAR_NO_REPLACE", "REQ_LAST_SEMANTICS", "REQ_OUTPUT_INVARIANTS", "REQ_ARCHITECTURE_POLICY", "REQ_VERIFICATION_CLOSURE"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 1144201745, "in_keep": 15, "in_last": 1, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 1}, "repeat": 5},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_SPARSE_KEEP_1010_LAST",
+        "description": "Accept data DDCCBBAA hexadecimal with keep 1010 and last one. Require only BB then DD hexadecimal on consecutive output transfers, skipping positions zero and two, and assert out_last only with DD before clearing.",
+        "requirement_ids": ["REQ_ACCEPT_BUFFER", "REQ_BYTE_ORDER_MAPPING", "REQ_SPARSE_KEEP_SKIP", "REQ_NO_BUBBLE_WITHIN_WORD", "REQ_LAST_SEMANTICS", "REQ_FINAL_CLEAR_NO_REPLACE"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 3721182122, "in_keep": 10, "in_last": 1, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 1}, "repeat": 3},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_SPARSE_KEEP_0101_NOT_LAST",
+        "description": "Accept data 40302010 hexadecimal with keep 0101 and last zero. Require only 10 then 30 hexadecimal, no bubble between them, and out_last zero on every cycle including the final valid byte.",
+        "requirement_ids": ["REQ_BYTE_ORDER_MAPPING", "REQ_SPARSE_KEEP_SKIP", "REQ_NO_BUBBLE_WITHIN_WORD", "REQ_LAST_SEMANTICS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 1076895760, "in_keep": 5, "in_last": 0, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 1}, "repeat": 3},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_BLOCKED_STABILITY_AND_INPUT_ISOLATION",
+        "description": "Accept data 44332211 with keep 1111 and last one while out_ready is low. After byte 11 appears, repeatedly change in_valid, every in_data byte, in_keep, and in_last while remaining blocked. Require in_ready zero and out_valid, out_data 11, and out_last zero to remain exactly stable. Then assert ready and require progression to 22 without a bubble.",
+        "requirement_ids": ["REQ_BACKPRESSURE_STABILITY", "REQ_NO_BUBBLE_WITHIN_WORD", "REQ_ACCEPT_BUFFER", "REQ_OUTPUT_INVARIANTS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 1144201745, "in_keep": 15, "in_last": 1, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 4294967295, "in_keep": 1, "in_last": 0, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 305419896, "in_keep": 10, "in_last": 1, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 2864434397, "in_keep": 4, "in_last": 0, "out_ready": 0}, "repeat": 3},
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 2864434397, "in_keep": 4, "in_last": 0, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_FINAL_EDGE_CANNOT_ACCEPT_REPLACEMENT",
+        "description": "Accept a one-byte word 0000005A with keep 0001 and last one. On the edge that transfers its final byte, simultaneously hold a second valid word 88776655 with keep 0010 and last zero. Require the first word to clear and the second word not to be accepted because pre-edge in_ready was zero. Keep the second input asserted for the following ready edge, then require it to be accepted and later emit byte 66 hexadecimal.",
+        "requirement_ids": ["REQ_ACCEPT_BUFFER", "REQ_FINAL_CLEAR_NO_REPLACE", "REQ_BYTE_ORDER_MAPPING", "REQ_LAST_SEMANTICS", "REQ_OUTPUT_INVARIANTS"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 90, "in_keep": 1, "in_last": 1, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 2289526357, "in_keep": 2, "in_last": 0, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 2289526357, "in_keep": 2, "in_last": 0, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 0}}
+        ]
+      },
+      {
+        "id": "TEST_ZERO_KEEP_DROP",
+        "description": "Handshake an input with data DEADBEEF, keep 0000, and last one while empty. Require it to be discarded immediately with in_ready still one and all outputs zero. Change all payload signals for several idle cycles to demonstrate no delayed or stale output appears, then accept a nonzero word normally.",
+        "requirement_ids": ["REQ_ZERO_KEEP_DROP", "REQ_OUTPUT_INVARIANTS", "REQ_ACCEPT_BUFFER"],
+        "reset_before": true,
+        "cycles": [
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 3735928559, "in_keep": 0, "in_last": 1, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 4294967295, "in_keep": 15, "in_last": 1, "out_ready": 1}, "repeat": 4},
+          {"drive": {"rst_n": 1, "in_valid": 1, "in_data": 170, "in_keep": 1, "in_last": 0, "out_ready": 0}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 1}},
+          {"drive": {"rst_n": 1, "in_valid": 0, "in_data": 0, "in_keep": 0, "in_last": 0, "out_ready": 0}}
+        ]
+      }
+    ],
+    "max_repair_rounds": 8,
+    "repair_candidates": 4,
+    "stagnation_limit": 2,
+    "trace_window_cycles": 12,
+    "max_counterexamples": 128,
+    "directed_test_budget": 112,
+    "random_regression_cycles": 800,
+    "oracle_coverage_target_pct": 90,
+    "oracle_coverage_rounds": 3,
+    "oracle_coverage_cycle_budget": 360,
+    "adaptive_tests_per_round": 8,
+    "adaptive_cycle_budget": 180,
+    "internal_trace_signals": 64,
+    "verilator_lint": true,
+    "formal_mode": "required",
+    "formal_depth": 32,
+    "formal_timeout_seconds": 240,
+    "universal_mode": "required",
+    "universal_induction_depth": 8,
+    "universal_timeout_seconds": 240,
+    "universal_properties": [
+      {
+        "id": "PROP_BLOCKED_OUTPUT_STABILITY",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_BACKPRESSURE_STABILITY"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"port": "out_valid", "at": "previous"},
+            {"op": "not", "arg": {"port": "out_ready", "at": "previous"}}
+          ]
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "out_valid", "at": "current"}, "right": {"port": "out_valid", "at": "previous"}},
+            {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"port": "out_data", "at": "previous"}},
+            {"op": "eq", "left": {"port": "out_last", "at": "current"}, "right": {"port": "out_last", "at": "previous"}},
+            {"op": "eq", "left": {"port": "in_ready", "at": "current"}, "right": {"const": 0, "width": 1}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_OUT_LAST_REQUIRES_VALID",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_LAST_SEMANTICS", "REQ_OUTPUT_INVARIANTS"],
+        "antecedent": {"port": "out_last", "at": "current"},
+        "consequent": {"port": "out_valid", "at": "current"}
+      },
+      {
+        "id": "PROP_INVALID_OUTPUT_IS_ZERO_AND_READY",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_OUTPUT_INVARIANTS", "REQ_ASYNC_RESET_IDLE"],
+        "antecedent": {
+          "op": "eq",
+          "left": {"port": "out_valid", "at": "current"},
+          "right": {"const": 0, "width": 1}
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"const": 0, "width": 8}},
+            {"op": "eq", "left": {"port": "out_last", "at": "current"}, "right": {"const": 0, "width": 1}},
+            {"op": "eq", "left": {"port": "in_ready", "at": "current"}, "right": {"const": 1, "width": 1}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_VALID_BLOCKS_INPUT",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_ACCEPT_BUFFER", "REQ_FINAL_CLEAR_NO_REPLACE", "REQ_BACKPRESSURE_STABILITY"],
+        "antecedent": {"port": "out_valid", "at": "current"},
+        "consequent": {
+          "op": "eq",
+          "left": {"port": "in_ready", "at": "current"},
+          "right": {"const": 0, "width": 1}
+        }
+      },
+      {
+        "id": "PROP_ZERO_KEEP_ACCEPT_STAYS_EMPTY",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_ZERO_KEEP_DROP"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"port": "in_ready", "at": "previous"},
+            {"port": "in_valid", "at": "previous"},
+            {"op": "eq", "left": {"port": "in_keep", "at": "previous"}, "right": {"const": 0, "width": 4}}
+          ]
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "in_ready", "at": "current"}, "right": {"const": 1, "width": 1}},
+            {"op": "eq", "left": {"port": "out_valid", "at": "current"}, "right": {"const": 0, "width": 1}},
+            {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"const": 0, "width": 8}},
+            {"op": "eq", "left": {"port": "out_last", "at": "current"}, "right": {"const": 0, "width": 1}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_NONZERO_KEEP_ACCEPT_CREATES_OUTPUT",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_ACCEPT_BUFFER", "REQ_BYTE_ORDER_MAPPING", "REQ_SPARSE_KEEP_SKIP"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"port": "in_ready", "at": "previous"},
+            {"port": "in_valid", "at": "previous"},
+            {"op": "ne", "left": {"port": "in_keep", "at": "previous"}, "right": {"const": 0, "width": 4}}
+          ]
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "out_valid", "at": "current"}, "right": {"const": 1, "width": 1}},
+            {"op": "eq", "left": {"port": "in_ready", "at": "current"}, "right": {"const": 0, "width": 1}}
+          ]
+        }
+      },
+      {
+        "id": "PROP_LAST_MARKED_BYTE_TRANSFER_CLEARS",
+        "kind": "always_implication",
+        "requirement_ids": ["REQ_FINAL_CLEAR_NO_REPLACE", "REQ_LAST_SEMANTICS"],
+        "antecedent": {
+          "op": "and",
+          "args": [
+            {"port": "out_valid", "at": "previous"},
+            {"port": "out_last", "at": "previous"},
+            {"port": "out_ready", "at": "previous"}
+          ]
+        },
+        "consequent": {
+          "op": "and",
+          "args": [
+            {"op": "eq", "left": {"port": "out_valid", "at": "current"}, "right": {"const": 0, "width": 1}},
+            {"op": "eq", "left": {"port": "out_data", "at": "current"}, "right": {"const": 0, "width": 8}},
+            {"op": "eq", "left": {"port": "out_last", "at": "current"}, "right": {"const": 0, "width": 1}},
+            {"op": "eq", "left": {"port": "in_ready", "at": "current"}, "right": {"const": 1, "width": 1}}
+          ]
+        }
+      }
+    ]
+  }
+}

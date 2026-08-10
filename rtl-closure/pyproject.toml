@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtl-closure"
+version = "0.6.1"
+description = "SiliconWeaver engine for verified RTL generation, repair, and publication"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.12"
+authors = [{name = "vpromise"}]
+maintainers = [{name = "vpromise"}]
+keywords = ["agent", "asic", "eda", "librelane", "rtl", "verification"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "openai>=1.0,<3",
+  "PyYAML>=5,<7",
+]
+
+[project.urls]
+Homepage = "https://github.com/vpromise/SiliconWeaver"
+Documentation = "https://github.com/vpromise/SiliconWeaver/tree/main/rtl-closure#readme"
+Repository = "https://github.com/vpromise/SiliconWeaver"
+Issues = "https://github.com/vpromise/SiliconWeaver/issues"
+Changelog = "https://github.com/vpromise/SiliconWeaver/blob/main/rtl-closure/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = ["pytest==7.4.4", "ruff==0.14.14"]
+
+[project.scripts]
+rtl-closure = "rtl_closure.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/rtl-closure" = [
+  "README.md",
+  "OSS_SCOPE.md",
+  "CHANGELOG.md",
+  "THIRD_PARTY.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
+  "LICENSE",
+  "NOTICE",
+]
+"share/rtl-closure/docs" = ["docs/PIPELINE_FLOW_CN.md"]
+"share/rtl-closure/examples" = ["examples/*.json"]
+"share/rtl-closure/docker" = ["docker/verify.Dockerfile"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]

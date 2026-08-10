@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-lane"
+version = "0.5.1"
+description = "SiliconWeaver control plane for verified RTL and managed LibreLane flows"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.12"
+authors = [{name = "vpromise"}]
+maintainers = [{name = "vpromise"}]
+keywords = ["agent", "asic", "eda", "gds", "librelane", "rtl"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = ["PyYAML>=5,<7"]
+
+[project.urls]
+Homepage = "https://github.com/vpromise/SiliconWeaver"
+Documentation = "https://github.com/vpromise/SiliconWeaver/tree/main/pi-lane#readme"
+Repository = "https://github.com/vpromise/SiliconWeaver"
+Issues = "https://github.com/vpromise/SiliconWeaver/issues"
+Changelog = "https://github.com/vpromise/SiliconWeaver/blob/main/pi-lane/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = ["pytest==7.4.4", "ruff==0.14.14"]
+
+[project.scripts]
+lane-agent = "pi_lane.cli:main"
+pi-lanectl = "pi_lane.orchestrator_cli:main"
+pi-lane-orchestratord = "pi_lane.orchestrator_server:main"
+pi-lane = "pi_lane.launcher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/pi-lane" = [
+  "README.md",
+  "OSS_SCOPE.md",
+  "CHANGELOG.md",
+  "THIRD_PARTY.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
+  "LICENSE",
+  "NOTICE",
+]
+"share/pi-lane/extensions" = [
+  "extensions/lane-monitor-core.ts",
+  "extensions/lane-monitor.ts",
+]
+"share/pi-lane/prompts" = ["prompts/LIBRELANE_AGENT.md"]
+"share/pi-lane/docs" = [
+  "docs/ORCHESTRATOR_V3_CN.md",
+  "docs/PIPELINE_FLOW_CN.md",
+  "docs/ARCHITECTURE.md",
+  "docs/DEVELOPMENT.md",
+  "docs/RELEASE_CHECKLIST.md",
+]
+"share/pi-lane/specs" = ["specs/README.md", "specs/*.json"]
+"share/pi-lane/examples" = ["examples/README.md"]
+"share/pi-lane/examples/arbiters" = ["examples/arbiters/*.json"]
+"share/pi-lane/examples/counters" = ["examples/counters/*.json"]
+"share/pi-lane/examples/streaming" = ["examples/streaming/*.json"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]

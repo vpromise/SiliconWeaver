@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "design": {
+    "name": "lane_viz_counter",
+    "description": "Implement an 8-bit unsigned saturating up/down counter named lane_viz_counter. The count output is an 8-bit unsigned register. rst_n is an asynchronous active-low reset: whenever rst_n is low, count must immediately become 8'h00 independent of clk and all other inputs. Otherwise, on each rising edge of clk, apply this priority: (1) when load is high, load count with the unsigned 8-bit load_value, regardless of enable and direction; (2) otherwise, when enable is high and direction is high, increment count by one if count is less than 8'hFF, but hold at 8'hFF when already at the upper limit so it never wraps to zero; (3) otherwise, when enable is high and direction is low, decrement count by one if count is greater than 8'h00, but hold at 8'h00 when already at the lower limit so it never wraps to 8'hFF; (4) otherwise retain count. at_max and at_min are 1-bit combinational outputs with no pipeline latency: at_max is asserted exactly when the current registered count equals 8'hFF, and at_min is asserted exactly when the current registered count equals 8'h00. Verify asynchronous reset, arbitrary load values, load priority when load and enable are both high in both directions, hold behavior, both count directions, upper saturation, lower saturation, and correct at_max and at_min behavior. No latches, tri-state logic, delay statements, initial blocks, vendor-specific primitives, file I/O, or SystemVerilog DPI are allowed.",
+    "pdk": "sky130A",
+    "ports": [
+      {"name": "clk", "direction": "input", "width": 1},
+      {"name": "rst_n", "direction": "input", "width": 1},
+      {"name": "enable", "direction": "input", "width": 1},
+      {"name": "direction", "direction": "input", "width": 1},
+      {"name": "load", "direction": "input", "width": 1},
+      {"name": "load_value", "direction": "input", "width": 8},
+      {"name": "count", "direction": "output", "width": 8},
+      {"name": "at_max", "direction": "output", "width": 1},
+      {"name": "at_min", "direction": "output", "width": 1}
+    ],
+    "clock": {"port": "clk", "period_ns": 10.0},
+    "reset": {"port": "rst_n", "active_low": true, "asynchronous": true}
+  },
+  "flow": {
+    "name": "Classic",
+    "to": null,
+    "floorplan_sizing": "absolute",
+    "core_utilization": 40,
+    "place_density_pct": 60,
+    "die_area": [0, 0, 300, 300],
+    "core_area": [20, 20, 280, 280],
+    "jobs": 4
+  },
+  "generation": {
+    "profile": "api",
+    "n": 3,
+    "max_turns": 3,
+    "num_verify_tests": 100,
+    "independent_verify_tests": 300,
+    "temperature": 0.4,
+    "seed": 42,
+    "reasoning_effort": "medium"
+  }
+}

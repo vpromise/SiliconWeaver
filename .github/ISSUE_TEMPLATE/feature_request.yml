@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a scoped improvement to the public Agent stack.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Pipeline boundary
+      options:
+        - Specification and intent closure
+        - RTL generation and repair
+        - RTL verification and publication
+        - Durable orchestration and monitoring
+        - Physical implementation and QoR
+        - Documentation, CI, or packaging
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and evidence
+      description: Explain the interface, safety boundary, failure behavior, and how the change should be tested.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request does not require hidden benchmarks, proprietary PDK material, or weakening a required verification gate.
+          required: true
