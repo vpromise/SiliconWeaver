@@ -32,7 +32,7 @@ Issues = "https://github.com/vpromise/SiliconWeaver/issues"
 Changelog = "https://github.com/vpromise/SiliconWeaver/blob/main/pi-lane/CHANGELOG.md"
 
 [project.optional-dependencies]
-test = ["pytest==7.4.4", "ruff==0.14.14"]
+test = ["pytest==9.1.1", "ruff==0.14.14"]
 
 [project.scripts]
 lane-agent = "pi_lane.cli:main"
