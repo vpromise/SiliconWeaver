@@ -13,9 +13,9 @@
     "node": ">=24.0.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.82.1",
-    "@earendil-works/pi-tui": "0.82.1",
-    "@types/node": "22.19.19",
-    "typescript": "5.9.3"
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-tui": "0.84.1",
+    "@types/node": "26.1.2",
+    "typescript": "7.0.2"
   }
 }
