@@ -35,7 +35,7 @@ Issues = "https://github.com/vpromise/SiliconWeaver/issues"
 Changelog = "https://github.com/vpromise/SiliconWeaver/blob/main/rtl-closure/CHANGELOG.md"
 
 [project.optional-dependencies]
-test = ["pytest==9.1.1", "ruff==0.14.14"]
+test = ["pytest==9.1.1", "ruff==0.16.1"]
 
 [project.scripts]
 rtl-closure = "rtl_closure.cli:main"
