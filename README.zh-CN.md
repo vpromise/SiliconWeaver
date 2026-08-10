@@ -100,7 +100,7 @@ SiliconWeaver 不会把任意一个成功退出的命令等同于“芯片已经
 |---|---:|
 | Pi-Lane | 0.5.1 |
 | RTL-Closure | 0.6.1 |
-| Pi coding agent | 0.82.1 |
+| Pi coding agent | 0.84.1 |
 | LibreLane | 3.0.5 |
 | Python | 3.12 |
 | Node.js | 24 |

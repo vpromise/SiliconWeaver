@@ -11,4 +11,5 @@
 - remove internal extraction wording, machine-local provenance, and
   checkout-relative companion repository links from public documentation;
 - add public package classifiers and dependency-update configuration;
+- update the test runner to pytest 9.1.1 for its published security fixes;
 - add contribution and security documentation.

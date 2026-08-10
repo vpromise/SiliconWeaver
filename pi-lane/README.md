@@ -29,7 +29,7 @@ Pi-Lane is released under Apache-2.0. See [`LICENSE`](LICENSE) and
 
 - Linux, Docker, Python 3.12, and Node.js 24;
 - RTL-Closure 0.6.x installed in the same Python environment;
-- Pi 0.82.1, pinned by this repository's `package-lock.json`;
+- Pi 0.84.1, pinned by this repository's `package-lock.json`;
 - LibreLane 3.0.5 and an open PDK managed through `lane-agent`;
 - an OpenAI-compatible model endpoint for RTL-Closure generation.
 

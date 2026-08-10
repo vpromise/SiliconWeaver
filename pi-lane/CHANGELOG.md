@@ -15,4 +15,6 @@
   repository links from public documentation;
 - align the declared Python floor with the tested Python 3.12 runtime and add
   public package classifiers and dependency-update configuration;
+- update the pinned Pi stack to 0.84.1 and the test runner to pytest 9.1.1 so
+  the initial public dependency graph contains their published security fixes;
 - add contribution, security, development, and release documentation.
