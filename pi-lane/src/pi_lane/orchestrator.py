@@ -8,6 +8,7 @@ authoritative for the artifacts they produce.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -160,22 +161,25 @@ def rtl_closure_runtime_config_fingerprint(
     model = str(values.get("RTL_CLOSURE_MODEL") or "").strip()
     base_url = str(values.get("RTL_CLOSURE_BASE_URL") or "").strip().rstrip("/")
     api_key = values.get("RTL_CLOSURE_API_KEY")
-    key_identity = (
-        sha256_text("present\0" + str(api_key))
-        if api_key is not None
-        else sha256_text("absent")
+    config_identity = canonical_json(
+        {
+            "schema_version": 2,
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "api_key_present": api_key is not None,
+        }
     )
-    return sha256_text(
-        canonical_json(
-            {
-                "schema_version": 1,
-                "provider": provider,
-                "model": model,
-                "base_url": base_url,
-                "api_key_sha256": key_identity,
-            }
-        )
-    )
+    message = (
+        "pi-lane/rtl-closure-runtime-config-fingerprint/v2\0" + config_identity
+    ).encode("utf-8")
+    if api_key is None:
+        return hashlib.sha256(b"absent\0" + message).hexdigest()
+    return hmac.new(
+        str(api_key).encode("utf-8"),
+        b"present\0" + message,
+        digestmod=hashlib.sha256,
+    ).hexdigest()
 
 
 def _read_spec_bytes(path: Path) -> tuple[Path, bytes]:
