@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import httpx2
 
 from rtl_closure.backend import (
     ReasoningBackend,
@@ -79,7 +82,7 @@ class BackendTests(unittest.TestCase):
     def make_backend(self, *, events=None, max_retries=1, max_concurrency=2):
         openai_patch = patch("rtl_closure.backend.OpenAI")
         http_patch = patch(
-            "rtl_closure.backend.DefaultHttpxClient", return_value=object()
+            "rtl_closure.backend.DefaultHttpx2Client", return_value=object()
         )
         openai = openai_patch.start()
         http_patch.start()
@@ -95,6 +98,64 @@ class BackendTests(unittest.TestCase):
             progress=(events.append if events is not None else None),
         )
         return backend, openai.return_value
+
+    def test_openai3_httpx2_transport_streams_chat_completion(self):
+        requests: list[httpx2.Request] = []
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            requests.append(request)
+            chunk = {
+                "id": "chatcmpl-transport-test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "gpt-test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "module demo; endmodule"},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            content = (
+                "data: "
+                + json.dumps(chunk, separators=(",", ":"))
+                + "\n\ndata: [DONE]\n\n"
+            ).encode("utf-8")
+            return httpx2.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=content,
+                request=request,
+            )
+
+        transport_client = httpx2.Client(
+            transport=httpx2.MockTransport(handler)
+        )
+        with patch(
+            "rtl_closure.backend.DefaultHttpx2Client",
+            return_value=transport_client,
+        ):
+            backend = ReasoningBackend(
+                model="gpt-test",
+                base_url="https://example.invalid/v1",
+                api_key="secret",
+            )
+        try:
+            self.assertEqual(
+                backend.generate("design", max_tokens=64),
+                ["module demo; endmodule"],
+            )
+        finally:
+            backend.client.close()
+
+        self.assertEqual(len(requests), 1)
+        request = requests[0]
+        self.assertEqual(request.url.path, "/v1/chat/completions")
+        self.assertEqual(request.headers["authorization"], "Bearer secret")
+        payload = json.loads(request.content)
+        self.assertEqual(payload["model"], "gpt-test")
+        self.assertIs(payload["stream"], True)
 
     def test_streams_and_concatenates_content(self):
         events: list[dict] = []

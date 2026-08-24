@@ -23,7 +23,7 @@ classifiers = [
   "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-  "openai>=1.0,<3",
+  "openai>=3.3.1,<4",
   "PyYAML>=5,<7",
 ]
 

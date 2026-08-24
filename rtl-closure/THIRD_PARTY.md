@@ -7,7 +7,7 @@ Direct Python dependencies in the Agent-only release are:
 
 | Component | Version range | License recorded by the installed distribution |
 |---|---|---|
-| OpenAI Python library | `>=1.0,<3` | Apache-2.0 |
+| OpenAI Python library | `>=3.3.1,<4` | Apache-2.0 |
 | PyYAML | `>=5,<7` | MIT |
 
 `docker/verify.Dockerfile` derives a verification environment from a pinned
