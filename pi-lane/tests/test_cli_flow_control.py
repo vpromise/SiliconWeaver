@@ -152,7 +152,7 @@ class DoctorAndFlowControlTests(unittest.TestCase):
             command, _ = build_docker_command(
                 config,
                 run_id="new",
-                tag="tag",
+                tag="PI_LANE_new",
                 pdk_root=root / "pdk",
                 overrides=[],
                 frm="Checker.YosysUnmappedCells",
