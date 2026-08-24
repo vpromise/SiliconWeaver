@@ -36,6 +36,9 @@ PROTECTED_OVERRIDE_KEYS = frozenset(
         "BASE_SDC_FILE",
         "FLOW",
         "FLOW_NAME",
+        "FP_SIZING",
+        "DIE_AREA",
+        "CORE_AREA",
         "STEPS",
         "SUBSTITUTING_STEPS",
     }
@@ -213,10 +216,6 @@ def capture_design_inputs(
         "bundle_sha256": hashlib.sha256(bundle_bytes).hexdigest(),
     }
     return manifest, captured
-
-
-def design_input_manifest(config: DesignConfig) -> dict[str, Any]:
-    return capture_design_inputs(config)[0]
 
 
 def verify_design_input_snapshot(state: Any) -> list[str]:

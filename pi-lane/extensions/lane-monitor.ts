@@ -18,7 +18,6 @@ import {
 	initialWorkflowEventCursor,
 	installSnapshot,
 	isManagedStateAbsent,
-	jsonObjectArrayPayload,
 	jsonObjectPayload,
 	laneEventReport,
 	laneSnapshot,
@@ -268,32 +267,6 @@ async function jsonCommand(
 	}
 }
 
-async function jsonArrayCommand(
-	pi: ExtensionAPI,
-	command: string,
-	args: string[],
-	signal?: AbortSignal,
-): Promise<JsonArrayCommandOutcome> {
-	const label = `${command} ${args[0] ?? ""}`.trim();
-	try {
-		const result = await pi.exec(command, args, { timeout: 8_000, signal });
-		const stdout = result.stdout.trim();
-		if (stdout) {
-			try {
-				const values = jsonObjectArrayPayload(JSON.parse(stdout) as unknown);
-				if (values) return { values };
-				return { error: `${label}: JSON response is not an object array` };
-			} catch (error) {
-				return { error: `${label}: invalid JSON: ${errorMessage(error)}` };
-			}
-		}
-		const diagnostic = result.stderr.trim().slice(0, 800);
-		return { error: `${label}: ${diagnostic || `exit code ${result.code}`}` };
-	} catch (error) {
-		return { error: `${label}: ${errorMessage(error).slice(0, 800)}` };
-	}
-}
-
 async function orchestratorJsonCommand(
 	pi: ExtensionAPI,
 	args: string[],
@@ -360,18 +333,6 @@ async function orchestratorListCommand(
 	} catch (error) {
 		return { error: `${label}: ${errorMessage(error).slice(0, 800)}` };
 	}
-}
-
-function activeRunId(
-	values: Record<string, unknown>[],
-	idField: "workflow_id" | "run_id",
-): string | undefined {
-	for (const value of values) {
-		const runId = monitorRunId(value[idField]);
-		const status = typeof value.status === "string" ? value.status : undefined;
-		if (runId && status && DISCOVERABLE.has(status)) return runId;
-	}
-	return undefined;
 }
 
 function preferredWorkflowRunId(values: Record<string, unknown>[]): string | undefined {
@@ -1324,33 +1285,7 @@ export default function laneMonitor(pi: ExtensionAPI) {
 		let bound = bindings.rtl_closure;
 		const pinned = pinnedSources.has("rtl_closure");
 		if (workflowClaimed && !bound) return undefined;
-		const discover = !workflowClaimed
-			&& !pinned
-			&& (!bound || terminalBySource.get("rtl_closure") === true);
-		if (discover) {
-			const listing = await jsonArrayCommand(
-				pi,
-				"rtl-closure",
-				["list", "--active", "--limit", "1", "--json"],
-				sessionAbort?.signal,
-			);
-			if (!active(generation)) return undefined;
-			reportPollHealth(
-				"rtl_closure",
-				undefined,
-				listing.error ? [listing.error] : [],
-				generation,
-			);
-			if (listing.error) return undefined;
-			const discovered = activeRunId(listing.values ?? [], "run_id");
-			if (!discovered) {
-				if (bound) setBinding("rtl_closure", undefined);
-				if (!pinnedSources.has("lane")) setBinding("lane", undefined);
-				return undefined;
-			}
-			bound = discovered;
-			setBinding("rtl_closure", bound);
-		}
+		if (!workflowClaimed && !pinned) return undefined;
 		if (!bound) return undefined;
 		const args = ["report", "--run-id", bound, "--compact", "--json"];
 		const result = await jsonCommand(
@@ -1379,7 +1314,7 @@ export default function laneMonitor(pi: ExtensionAPI) {
 			if (result.value) {
 				reportPollHealth(
 					"rtl_closure",
-					discover ? undefined : bound,
+					bound,
 					["RTL-Closure report omitted a valid run_id/status snapshot"],
 					generation,
 				);
@@ -1477,28 +1412,7 @@ export default function laneMonitor(pi: ExtensionAPI) {
 		let runId = bindings.lane;
 		const pinned = pinnedSources.has("lane");
 		const childRun = workflowClaimed ? runId : rtlClosure?.laneRunId;
-		const discover = !workflowClaimed
-			&& !childRun
-			&& !pinned
-			&& (!runId || terminalBySource.get("lane") === true);
-		if (discover) {
-			const discovery = await jsonArrayCommand(
-				pi,
-				"lane-agent",
-				["list", "--active", "--limit", "1", "--json"],
-				sessionAbort?.signal,
-			);
-			if (!active(generation)) return undefined;
-			reportPollHealth("lane", undefined, discovery.error ? [discovery.error] : [], generation);
-			if (discovery.error) return undefined;
-			const discovered = activeRunId(discovery.values ?? [], "run_id");
-			if (!discovered) {
-				if (runId) setBinding("lane", undefined);
-				return undefined;
-			}
-			runId = discovered;
-			setBinding("lane", runId);
-		}
+		if (!workflowClaimed && !childRun && !pinned) return undefined;
 		if (!runId) return undefined;
 
 		const replay = await replayLaneEvents(runId, generation);
@@ -1987,12 +1901,19 @@ export default function laneMonitor(pi: ExtensionAPI) {
 			}
 			if (action === "auto") {
 				const requested = tokens[1]?.toLowerCase();
+				if (requested === "rtl_closure" || requested === "lane") {
+					ctx.ui.notify(
+						"Standalone RTL-Closure and Lane auto-discovery is disabled; use workflow auto-discovery or an explicit follow target",
+						"error",
+					);
+					return;
+				}
 				const selected = requested && requested !== "all"
 					? [requested as MonitorSource]
 					: SOURCES;
 				if (selected.some((source) => !SOURCES.includes(source))) {
 					ctx.ui.notify(
-						"Usage: /lane-monitor auto [workflow|rtl_closure|lane|pdk|image|all]",
+						"Usage: /lane-monitor auto [workflow|pdk|image|all]",
 						"error",
 					);
 					return;
@@ -2018,7 +1939,7 @@ export default function laneMonitor(pi: ExtensionAPI) {
 				return;
 			}
 			ctx.ui.notify(
-				"Usage: /lane-monitor [on|off|status|latest|follow <workflow|rtl_closure|lane|pdk|image> <run-id>|auto [source|all]]",
+				"Usage: /lane-monitor [on|off|status|latest|follow <workflow|rtl_closure|lane|pdk|image> <run-id>|auto [workflow|pdk|image|all]]",
 				"error",
 			);
 		},

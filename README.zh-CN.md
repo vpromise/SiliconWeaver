@@ -40,6 +40,9 @@ SiliconWeaver 当前属于研究与工程预览版本。它产生的开源工具
   回归，并在退化时回滚。
 - **物理流程受管理。** 长时间 LibreLane 任务在后台执行，同时保存持久身份、可恢复
   状态、QoR、产物和完整性证明。
+- **物理规划必须显式启用并绑定证据。** 可选的工具驱动物理规划会在最终 Lane
+  运行前探测已封闭的几何候选集合；公开默认值仍为 `off`，随包提供的 bootstrap
+  策略也不能作为可发布的校准证据。
 - **读写操作严格分离。** `status`、`report` 等命令是纯读取；`start`、`stop`、
   `retry`、`reconcile` 等状态变更必须显式发起。
 
@@ -53,7 +56,8 @@ flowchart LR
     O --> R["RTL-Closure"]
     R --> V["Oracle 共识、仿真、形式验证、Lint、综合与修复门禁"]
     V --> B["只读 RTL 发布包"]
-    B --> L["lane-agent"]
+    B --> F["可选的 fail-closed 物理规划"]
+    F --> L["lane-agent"]
     L --> C["LibreLane 3.0.5 Classic Flow"]
     C --> E["GDS、QoR、报告、哈希和完整性证明"]
     O -. "有界状态与持久事件" .-> P
@@ -65,8 +69,8 @@ flowchart LR
 
 | 组件 | 当前版本 | 职责 |
 |---|---:|---|
-| [`pi-lane/`](pi-lane/) | 0.5.1 | Pi profile、交互启动、持久编排、LibreLane 运行管理、QoR/产物完整性和 monitor UI |
-| [`rtl-closure/`](rtl-closure/) | 0.6.1 | 规格验证、Oracle 共识、RTL 生成、验证、有界修复、发布和 Lane 交接 |
+| [`pi-lane/`](pi-lane/) | 0.6.0 | Pi profile、交互启动、持久编排、证据绑定物理规划、LibreLane 运行管理、QoR/产物完整性和 monitor UI |
+| [`rtl-closure/`](rtl-closure/) | 0.7.0 | 规格验证、Oracle 共识、RTL 生成、四态验证、有界修复、发布、物理规划选择和 Lane 交接 |
 
 两个组件共享一个运行环境，但命令、状态根目录、运行身份、发布版本和产物彼此独立。
 
@@ -98,9 +102,9 @@ SiliconWeaver 不会把任意一个成功退出的命令等同于“芯片已经
 
 | 层 | 版本 |
 |---|---:|
-| Pi-Lane | 0.5.1 |
-| RTL-Closure | 0.6.1 |
-| Pi coding agent | 0.84.1 |
+| Pi-Lane | 0.6.0 |
+| RTL-Closure | 0.7.0 |
+| Pi coding agent | 0.84.2 |
 | LibreLane | 3.0.5 |
 | Python | 3.12 |
 | Node.js | 24 |

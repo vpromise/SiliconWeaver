@@ -14,3 +14,9 @@ Each managed run has a separate offline visualization sidecar. It records the
 Step timeline and notebook-style KLayout previews under the run's
 `visualizations/` directory. A visualization failure must be reported from the
 `visualization.errors` field, but it does not change the Classic Flow result.
+
+Tool-driven physical planning is a separate managed workflow. Preserve sealed
+candidate domains, schema-v2 plan/policy validation, immutable image/PDK/input
+identity, geometry-lock provenance, bounded probe endpoints, and idempotent
+final Lane handoff. The packaged bootstrap policy must remain non-publishable;
+calibration requires explicit complete Human reference evidence.

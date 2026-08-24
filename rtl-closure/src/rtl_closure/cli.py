@@ -53,6 +53,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 "floorplan_sizing": spec.flow["floorplan_sizing"],
                 "to": spec.flow["to"],
                 "mapped_equivalence_mode": spec.flow["mapped_equivalence_mode"],
+                "physical_planning_mode": spec.flow["physical_planning_mode"],
+                "physical_planning_policy": spec.flow.get(
+                    "physical_planning_policy"
+                ),
+                "reference_geometry_lock": spec.flow.get(
+                    "reference_geometry_lock"
+                ),
                 "architecture": spec.architecture,
                 "model_profile": spec.generation["profile"],
                 "model": spec.generation.get("model"),
@@ -327,7 +334,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "Reply with exactly: RTL_CLOSURE_OK",
             n=1,
             temperature=0,
-            max_tokens=32,
+            # Reasoning-capable local models can consume most of a tiny budget
+            # before emitting visible content, making the API health probe flaky.
+            max_tokens=256,
         )[0]
         checks["api"] = bool(response.strip())
     for name, ok in checks.items():

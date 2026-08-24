@@ -28,8 +28,8 @@ Pi-Lane is released under Apache-2.0. See [`LICENSE`](LICENSE) and
 ## Requirements
 
 - Linux, Docker, Python 3.12, and Node.js 24;
-- RTL-Closure 0.6.x installed in the same Python environment;
-- Pi 0.84.1, pinned by this repository's `package-lock.json`;
+- RTL-Closure 0.7.x installed in the same Python environment;
+- Pi 0.84.2, pinned by this repository's `package-lock.json`;
 - LibreLane 3.0.5 and an open PDK managed through `lane-agent`;
 - an OpenAI-compatible model endpoint for RTL-Closure generation.
 
@@ -92,7 +92,7 @@ Detailed documentation:
 
 ## Current Contracts
 
-Pi-Lane 0.5.1 accepts current formats only:
+Pi-Lane 0.6.0 accepts current formats only:
 
 | Boundary | Current format |
 |---|---|
@@ -102,6 +102,8 @@ Pi-Lane 0.5.1 accepts current formats only:
 | Lane managed run | schema 6 |
 | Lane durable event | schema 3 |
 | Lane visualization manifest | schema 3 |
+| Physical plan | schema 2 |
+| Physical-planning policy | schema 2 |
 
 The daemon rejects a database whose metadata or required table layout does not
 match schema 5. The monitor rejects non-protocol-3 envelopes and non-schema-6
@@ -134,6 +136,35 @@ unchanged. Confirmed child identity or evidence degradation produces the
 controlled transition `completed -> failed` and a durable
 `workflow.integrity_degraded` event; a terminal result is never reopened as
 running.
+
+## Physical Planning
+
+Physical planning is an optional, fail-closed preflight between verified RTL
+publication and the final LibreLane run. `lane-agent plan-start` seals a
+deterministic geometry candidate domain, reuses a frozen synthesis baseline,
+and runs bounded PDN, I/O-placement, detailed-placement, and mid-PnR robustness
+probes. The selected plan binds its configuration, input bundle, image digest,
+open-PDK identity, policy, candidates, probe evidence, and final geometry.
+
+```bash
+lane-agent plan-start --config /absolute/path/config.yaml --json
+lane-agent plan-status --plan-id <plan-id> --json
+lane-agent plan-geometry --plan-id <plan-id> --output geometry-lock.json
+```
+
+`plan-stop` is a mutation and requires the same care as stopping a managed Lane
+run. A completed plan can be supplied to `lane-agent start --physical-plan`, or
+RTL-Closure 0.7.x can orchestrate it through
+`flow.physical_planning_mode=auto_safe`. `reference_locked` additionally
+requires a content-bound exported geometry lock. The default is `off` so an
+existing specification cannot silently acquire new physical work.
+
+The bundled `physical-planning-policy-bootstrap-v2.json` is deliberately marked
+`publishable: false`. It is suitable for exercising the mechanism, not for
+claiming calibrated quality or a passing physical delivery. A publishable
+policy requires reviewed, complete Human reference evidence through
+`lane-agent plan-calibrate` and remains bound to the exact tool, image, and PDK
+identity.
 
 ## Model Configuration
 

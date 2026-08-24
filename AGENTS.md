@@ -24,5 +24,10 @@ material, user state, run artifacts, or NDA logs. Treat status/report commands
 as reads and start/stop/retry/reconcile operations as explicit mutations.
 
 Run the component-specific lint and test suites for every code change. Keep the
-Pi-Lane 0.5.x and RTL-Closure 0.6.x compatibility boundary documented whenever
+Pi-Lane 0.6.x and RTL-Closure 0.7.x compatibility boundary documented whenever
 a CLI, protocol, schema, state, or evidence contract changes.
+
+Physical planning is opt-in and fail-closed. Preserve the public default of
+`off`, the schema-v2 plan/policy boundary, immutable candidate and geometry
+hashes, and the bundled bootstrap policy's `publishable: false` status. Never
+replace calibration evidence with private comparison or benchmark material.

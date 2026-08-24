@@ -160,10 +160,6 @@ def request(
     )
 
 
-def daemon_ready(socket_path: Path = DEFAULT_SOCKET) -> bool:
-    return _daemon_ping(socket_path) is not None
-
-
 def _recognized_daemon_response(
     response: Mapping[str, Any], *, protocol_version: int
 ) -> bool:

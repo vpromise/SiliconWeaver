@@ -16,7 +16,7 @@ class CliTests(unittest.TestCase):
             parser.parse_args(["--version"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(output.getvalue(), "rtl-closure 0.6.1\n")
+        self.assertEqual(output.getvalue(), "rtl-closure 0.7.0\n")
 
 
 if __name__ == "__main__":

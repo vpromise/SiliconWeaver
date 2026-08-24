@@ -1,7 +1,7 @@
 # pi-lane 自然语言到 RTL/GDS 整体流程说明
 
-> 本文描述 Agent-only 版本的实际实现：`pi-lane 0.5.1`、
-> `rtl-closure 0.6.1`、LibreLane 镜像
+> 本文描述 Agent-only 版本的实际实现：`pi-lane 0.6.0`、
+> `rtl-closure 0.7.0`、LibreLane 镜像
 > `ghcr.io/librelane/librelane:3.0.5`。文中的状态名、目录和门禁均来自当前代码，
 > 不是未来规划。
 >
@@ -196,7 +196,7 @@ Agent 不应直接把自己临时写出的 Verilog 发布给 LibreLane，也不�
 | 区域 | 内容 | 下游用途 |
 |---|---|---|
 | `design` | 名称、完整行为描述、PDK、端口、时钟、复位、architecture | 接口、契约、RTL prompt、结构审计、SDC |
-| `flow` | `Classic`、执行终点、mapped equivalence、floorplan、利用率、密度、jobs | 生成 LibreLane `config.yaml` |
+| `flow` | `Classic`、执行终点、mapped equivalence、可选物理规划、floorplan、利用率、密度、jobs | 生成 LibreLane `config.yaml` 并选择是否先运行 planner |
 | `generation` | API profile、模型、候选数、轮数、随机测试、seed、思考深度 | 模型调用和初始候选预算 |
 | `verification` | 原子需求、定向场景、修复预算、formal/universal 配置 | 冻结验证闭包和发布门禁 |
 | `intent_closure` | 用户确认、未决问题、assumptions、确认哈希 | 绑定用户实际审阅的意图表面 |
@@ -229,6 +229,7 @@ Agent 不应直接把自己临时写出的 Verilog 发布给 LibreLane，也不�
     "name": "Classic",
     "to": null,
     "mapped_equivalence_mode": "off",
+    "physical_planning_mode": "off",
     "floorplan_sizing": "relative",
     "core_utilization": 40,
     "place_density_pct": 60,
@@ -260,6 +261,12 @@ Agent 不应直接把自己临时写出的 Verilog 发布给 LibreLane，也不�
 利用率决定尺寸，且不能携带 `die_area` / `core_area`。只有用户明确要求固定 outline 时才
 使用 `absolute`，并同时提供 `die_area` 和 `core_area`。对小设计机械套用
 `300 x 300` 的 die 会产生低利用率和大量 filler，可能被物理合理性门禁拒绝。
+
+`physical_planning_mode` 默认且推荐保持 `off`，因此旧规格不会静默增加物理工作。
+`auto_safe` 会在最终 Lane 运行前，由 `lane-agent plan-start` 对封闭候选集合执行 PDN、
+IO、详细放置和 mid-PnR 稳健性探测；`reference_locked` 还要求内容哈希绑定的绝对路径
+geometry lock。随包提供的 bootstrap policy 标记为 `publishable: false`，只能验证机制，
+不能充当标定后的 QoR、signoff 或流片证据。
 
 `design.architecture` 当前可机器检查的字段包括：
 

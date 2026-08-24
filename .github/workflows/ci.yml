@@ -56,7 +56,7 @@ jobs:
       - run: rtl-closure --version
       - name: Validate public specifications
         run: |
-          for spec in pi-lane/specs/*.json pi-lane/examples/*/*.json rtl-closure/examples/*.json; do
+          for spec in pi-lane/specs/simple_counter.json pi-lane/examples/*/*.json rtl-closure/examples/*.json; do
             rtl-closure validate --spec "$spec" >/dev/null
           done
       - name: Build RTL-Closure wheel

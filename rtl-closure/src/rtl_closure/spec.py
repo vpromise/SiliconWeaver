@@ -63,6 +63,11 @@ FLOW_FIELDS = {
     "die_area",
     "core_area",
     "jobs",
+    "physical_planning_mode",
+    "physical_planning_policy",
+    "physical_planning_policy_sha256",
+    "reference_geometry_lock",
+    "reference_geometry_lock_sha256",
 }
 GENERATION_FIELDS = {
     "profile",
@@ -793,6 +798,7 @@ def validate_spec(raw: dict[str, Any]) -> DesignSpec:
     flow.setdefault("core_utilization", 40)
     flow.setdefault("place_density_pct", 60)
     flow.setdefault("jobs", None)
+    flow.setdefault("physical_planning_mode", "off")
     has_die_area = "die_area" in flow
     has_core_area = "core_area" in flow
     sizing = flow.get("floorplan_sizing", "relative")
@@ -846,6 +852,79 @@ def validate_spec(raw: dict[str, Any]) -> DesignSpec:
         or not 1 <= flow["jobs"] <= 256
     ):
         raise SpecError("flow.jobs must be an integer from 1 to 256")
+    if flow["physical_planning_mode"] not in {
+        "auto_safe",
+        "reference_locked",
+        "off",
+    }:
+        raise SpecError(
+            "flow.physical_planning_mode must be auto_safe, reference_locked, or off"
+        )
+    planning_policy = flow.get("physical_planning_policy")
+    if flow["physical_planning_mode"] != "off" and planning_policy is not None:
+        if not isinstance(planning_policy, str) or not planning_policy:
+            raise SpecError("flow.physical_planning_policy must be a path")
+        candidate = Path(planning_policy).expanduser()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise SpecError("flow.physical_planning_policy does not exist") from exc
+        if not candidate.is_absolute() or candidate.is_symlink() or not resolved.is_file():
+            raise SpecError(
+                "flow.physical_planning_policy must be an absolute regular file"
+            )
+        if resolved.stat().st_size > 1024 * 1024:
+            raise SpecError("flow.physical_planning_policy exceeds 1 MiB")
+        flow["physical_planning_policy"] = str(resolved)
+        observed_digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        configured_digest = flow.get("physical_planning_policy_sha256")
+        if configured_digest is not None and configured_digest != observed_digest:
+            raise SpecError(
+                "flow.physical_planning_policy_sha256 does not match the file"
+            )
+        flow["physical_planning_policy_sha256"] = observed_digest
+    elif flow["physical_planning_mode"] == "off" and planning_policy is not None:
+        raise SpecError("flow.physical_planning_policy is invalid when planning is off")
+    elif (
+        flow["physical_planning_mode"] == "off"
+        and flow.get("physical_planning_policy_sha256") is not None
+    ):
+        raise SpecError(
+            "flow.physical_planning_policy_sha256 is invalid when planning is off"
+        )
+    elif planning_policy is None and flow.get("physical_planning_policy_sha256") is not None:
+        raise SpecError(
+            "flow.physical_planning_policy_sha256 requires a policy file"
+        )
+    reference_geometry_lock = flow.get("reference_geometry_lock")
+    if flow["physical_planning_mode"] == "reference_locked":
+        if not isinstance(reference_geometry_lock, str) or not reference_geometry_lock:
+            raise SpecError(
+                "reference_locked physical planning requires flow.reference_geometry_lock"
+            )
+        candidate = Path(reference_geometry_lock).expanduser()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise SpecError("flow.reference_geometry_lock does not exist") from exc
+        if not candidate.is_absolute() or candidate.is_symlink() or not resolved.is_file():
+            raise SpecError("flow.reference_geometry_lock must be an absolute regular file")
+        if resolved.stat().st_size > 1024 * 1024:
+            raise SpecError("flow.reference_geometry_lock exceeds 1 MiB")
+        flow["reference_geometry_lock"] = str(resolved)
+        observed_digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        configured_digest = flow.get("reference_geometry_lock_sha256")
+        if configured_digest is not None and configured_digest != observed_digest:
+            raise SpecError("flow.reference_geometry_lock_sha256 does not match the file")
+        flow["reference_geometry_lock_sha256"] = observed_digest
+    elif reference_geometry_lock is not None:
+        raise SpecError(
+            "flow.reference_geometry_lock is valid only in reference_locked mode"
+        )
+    elif flow.get("reference_geometry_lock_sha256") is not None:
+        raise SpecError(
+            "flow.reference_geometry_lock_sha256 is valid only in reference_locked mode"
+        )
 
     generation = dict(_object(raw.get("generation", {}), "generation"))
     _reject_unknown(generation, GENERATION_FIELDS, "generation")
@@ -1124,9 +1203,9 @@ def render_config(spec: DesignSpec) -> str:
 
 
 def render_pin_order(spec: DesignSpec) -> str:
-    """Render deterministic, bus-grouped custom I/O placement instructions."""
+    """Render deterministic I/O placement with contiguous wide-bus splitting."""
 
-    side_ports: dict[str, list[Port]] = {side: [] for side in "NSEW"}
+    side_pins: dict[str, list[str]] = {side: [] for side in "NSEW"}
     side_load = {side: 0 for side in "NSEW"}
 
     control_names = [spec.clock_port]
@@ -1136,26 +1215,37 @@ def render_pin_order(spec: DesignSpec) -> str:
     port_map = {port.name: port for port in spec.ports}
     for name in control_names:
         port = port_map[name]
-        side_ports["S"].append(port)
+        side_pins["S"].append(name)
         side_load["S"] += port.width
 
     for port in spec.ports:
         if port.name in control_set:
             continue
-        candidates = ("W", "S") if port.direction == "input" else ("E", "N")
-        side = min(candidates, key=lambda candidate: side_load[candidate])
-        side_ports[side].append(port)
-        side_load[side] += port.width
+        first, second = (
+            ("W", "S") if port.direction == "input" else ("E", "N")
+        )
+        numerator = side_load[second] + port.width - side_load[first]
+        first_count = max(0, min(port.width, (numerator + 1) // 2))
+        shares = ((first, 0, first_count), (second, first_count, port.width))
+        for side, start, stop in shares:
+            count = stop - start
+            if count <= 0:
+                continue
+            if port.width == 1:
+                side_pins[side].append(port.name)
+            elif count == port.width:
+                side_pins[side].append(rf"{port.name}\[\d+\]")
+            else:
+                side_pins[side].extend(
+                    rf"{port.name}\[{index}\]" for index in range(start, stop)
+                )
+            side_load[side] += count
 
     lines = ["@bus_major"]
     for side in "NSEW":
-        ports = side_ports[side]
-        if not ports:
+        pins = side_pins[side]
+        if not pins:
             continue
         lines.extend(("", f"#{side}"))
-        for port in ports:
-            if port.width == 1:
-                lines.append(port.name)
-            else:
-                lines.append(rf"{port.name}\[\d+\]")
+        lines.extend(pins)
     return "\n".join(lines) + "\n"

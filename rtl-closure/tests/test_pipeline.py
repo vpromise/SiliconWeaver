@@ -74,6 +74,7 @@ from rtl_closure.universal import (
     universal_requirement_coverage,
 )
 from rtl_closure.verification import VERIFY_IMAGE, derive_independent_stimuli
+from rtl_closure.logic_value import from_integer
 from rtl_closure.runtime import (
     SANDBOX_IMAGE,
     bind_sandbox_image,
@@ -84,6 +85,12 @@ from rtl_closure.runtime import (
 
 
 EXAMPLE = Path(__file__).parents[1] / "examples" / "counter.json"
+
+
+def legacy_lane_spec():
+    raw = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    raw["flow"]["physical_planning_mode"] = "off"
+    return validate_spec(raw)
 
 
 def lane_response(
@@ -1040,6 +1047,7 @@ class PipelineLifecycleSafetyTests(unittest.TestCase):
                 patch("rtl_closure.pipeline.CURRENT", root / "current"),
                 patch("rtl_closure.pipeline.subprocess.Popen", return_value=process),
                 patch("rtl_closure.pipeline._read_process_identity", return_value=None),
+                patch("rtl_closure.pipeline.time.sleep"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "identity could not be attested"):
                     start_pipeline(EXAMPLE, generate_only=True)
@@ -1047,6 +1055,27 @@ class PipelineLifecycleSafetyTests(unittest.TestCase):
             self.assertTrue(process.terminated)
             state_file = next(root.glob("*/state.json"))
             self.assertEqual(json.loads(state_file.read_text())["status"], "failed")
+
+    def test_registration_retries_transient_worker_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            process = self.FakeProcess(4202)
+            identity = self._identity(process.pid)
+            with (
+                patch("rtl_closure.pipeline.STATE_ROOT", root),
+                patch("rtl_closure.pipeline.CURRENT", root / "current"),
+                patch("rtl_closure.pipeline.subprocess.Popen", return_value=process),
+                patch(
+                    "rtl_closure.pipeline._read_process_identity",
+                    side_effect=[None, None, identity],
+                ),
+                patch("rtl_closure.pipeline.time.sleep") as sleep,
+            ):
+                started = start_pipeline(EXAMPLE, generate_only=True)
+
+            self.assertEqual(started["status"], "running")
+            self.assertEqual(started["worker_process"], identity)
+            self.assertEqual(sleep.call_count, 2)
 
     def test_process_identity_rejects_reused_pid(self):
         expected = self._identity(4301)
@@ -1403,7 +1432,7 @@ class PipelineLifecycleSafetyTests(unittest.TestCase):
             run_id = "run-retry-idempotent"
             run_dir = root / run_id
             config = run_dir / "config.yaml"
-            spec = load_spec(EXAMPLE)
+            spec = legacy_lane_spec()
             state = self._persist(
                 root,
                 run_id,
@@ -1492,13 +1521,14 @@ class PipelineLifecycleSafetyTests(unittest.TestCase):
             self.assertIsNone(current["failure_code"])
 
     def test_lane_start_rejects_mismatched_workflow_identity(self):
-        spec = load_spec(EXAMPLE)
+        spec = legacy_lane_spec()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = root / "config.yaml"
             config.write_text("meta: {}\n", encoding="utf-8")
             state = {
                 "state_file": str(root / "state.json"),
+                "run_dir": str(root),
                 "events_file": str(root / "events.jsonl"),
                 "event_sequence": 0,
                 "run_id": "run-lane-start-identity",
@@ -1525,6 +1555,183 @@ class PipelineLifecycleSafetyTests(unittest.TestCase):
             persisted = json.loads((root / "state.json").read_text())
             self.assertIsNone(persisted.get("lane_run_id"))
             self.assertEqual(persisted["lane_attempts"][0]["status"], "launch_unknown")
+
+
+    def test_auto_safe_planning_launch_and_final_lane_handoff_are_hash_bound(self):
+        raw = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+        raw["flow"]["physical_planning_mode"] = "auto_safe"
+        spec = validate_spec(raw)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "config.yaml"
+            config.write_text("meta: {}\n", encoding="utf-8")
+            spec_file = root / "spec.json"
+            spec_file.write_text(json.dumps(spec.raw), encoding="utf-8")
+            pipeline_log = root / "pipeline.log"
+            pipeline_log.write_text("", encoding="utf-8")
+            state = {
+                "state_file": str(root / "state.json"),
+                "events_file": str(root / "events.jsonl"),
+                "event_sequence": 0,
+                "run_id": "run-auto-plan",
+                "run_dir": str(root),
+                "design_name": spec.name,
+                "pdk": spec.pdk,
+                "status": "running",
+                "phase": "restarting_lane",
+                "design_config": str(config),
+                "spec_file": str(spec_file),
+                "pipeline_log": str(pipeline_log),
+                "started_epoch": 1,
+                "origin": {"workflow_id": "workflow-auto-plan"},
+                "lane_run_id": None,
+            }
+            save_state(state)
+            plan_hash = "a" * 64
+            geometry_hash = "b" * 64
+
+            def launch(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                if command[1] == "plan-start":
+                    self.assertIn("--final-idempotency-key", command)
+                    key_index = command.index("--idempotency-key")
+                    self.assertTrue(command[key_index + 1].endswith(":physical-plan"))
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "plan_id": "physical-plan-1",
+                                "status": "running",
+                                "phase": "baseline_running",
+                                "mode": "auto-safe",
+                                "config_path": str(config),
+                            }
+                        ),
+                        stderr="",
+                    )
+                if command[1] == "plan-status":
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "plan_id": "physical-plan-1",
+                                "status": "completed",
+                                "phase": "completed",
+                                "mode": "auto-safe",
+                                "config_path": str(config),
+                                "final_lane_run_id": "lane-after-plan",
+                                "plan_sha256": plan_hash,
+                                "geometry_lock_sha256": geometry_hash,
+                            }
+                        ),
+                        stderr="",
+                    )
+                if command[1] == "reconcile":
+                    current = json.loads((root / "state.json").read_text())
+                    child = lane_response(
+                        "lane-after-plan",
+                        workflow_id="workflow-auto-plan",
+                        attempt_id="lane-attempt-001",
+                        idempotency_key=current["lane_attempts"][0]["launch_key"],
+                    )
+                    child["physical_plan"] = {
+                        "plan_sha256": plan_hash,
+                        "geometry_lock_sha256": geometry_hash,
+                    }
+                    return SimpleNamespace(
+                        returncode=0, stdout=json.dumps(child), stderr=""
+                    )
+                raise AssertionError(command)
+
+            with (
+                patch("rtl_closure.pipeline.STATE_ROOT", root),
+                patch("rtl_closure.pipeline.subprocess.run", side_effect=launch),
+            ):
+                planned = _start_lane_unlocked(spec, state)
+                self.assertEqual(planned["physical_planning_id"], "physical-plan-1")
+                current = refresh_state(planned)
+
+            self.assertEqual(current["lane_run_id"], "lane-after-plan")
+            self.assertEqual(
+                current["lane_attempts"][0]["physical_plan_sha256"], plan_hash
+            )
+            self.assertEqual(
+                current["lane_attempts"][0]["geometry_lock_sha256"], geometry_hash
+            )
+
+    def test_physical_planning_failure_is_not_rtl_repairable(self):
+        raw = json.loads(EXAMPLE.read_text())
+        raw["flow"]["physical_planning_mode"] = "auto_safe"
+        spec = validate_spec(raw)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "config.yaml"
+            config.write_text("meta: {}\n", encoding="utf-8")
+            spec_file = root / "spec.json"
+            spec_file.write_text(json.dumps(spec.raw), encoding="utf-8")
+            pipeline_log = root / "pipeline.log"
+            pipeline_log.write_text("", encoding="utf-8")
+            state = {
+                "state_file": str(root / "state.json"),
+                "events_file": str(root / "events.jsonl"),
+                "event_sequence": 0,
+                "run_id": "run-plan-failed",
+                "run_dir": str(root),
+                "design_name": spec.name,
+                "pdk": spec.pdk,
+                "status": "running",
+                "phase": "physical_planning_candidate_probing",
+                "design_config": str(config),
+                "spec_file": str(spec_file),
+                "pipeline_log": str(pipeline_log),
+                "started_epoch": 1,
+                "origin": {"workflow_id": "workflow-plan-failed"},
+                "lane_run_id": None,
+                "physical_planning_id": "physical-plan-failed",
+                "physical_planning": {
+                    "plan_id": "physical-plan-failed",
+                    "status": "running",
+                    "phase": "candidate_probing",
+                },
+                "lane_attempts": [
+                    {
+                        "attempt_id": "lane-attempt-001",
+                        "lane_run_id": None,
+                        "status": "physical_planning",
+                        "launch_key": "c" * 64,
+                    }
+                ],
+                "active_lane_attempt_id": "lane-attempt-001",
+                "pid": None,
+                "worker_process": None,
+            }
+            save_state(state)
+            response = SimpleNamespace(
+                returncode=1,
+                stdout=json.dumps(
+                    {
+                        "plan_id": "physical-plan-failed",
+                        "status": "failed",
+                        "phase": "failed",
+                        "mode": "auto-safe",
+                        "config_path": str(config),
+                        "error": {
+                            "code": "PHYSICAL_PLANNING_FAILED",
+                            "message": "no candidate passed the PDN gate",
+                        },
+                    }
+                ),
+                stderr="",
+            )
+            with (
+                patch("rtl_closure.pipeline.STATE_ROOT", root),
+                patch("rtl_closure.pipeline.subprocess.run", return_value=response),
+            ):
+                failed = refresh_state(state)
+
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["failure_class"], "physical_planning")
+            self.assertFalse(failed["failure"]["repairable_by_rtl"])
+
 
     def test_nonzero_lane_reconcile_cannot_smuggle_success_json(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1906,9 +2113,18 @@ class PublishTests(unittest.TestCase):
         universal_execution["evidence_sha256"] = content_hash(
             universal_execution
         )
+        equivalence_preparation_script = "read_verilog -sv /work/design.sv;"
+        equivalence_preparation_log = "preparation complete"
+        equivalence_proof_script = "equiv_status -assert @observable_equiv;"
+        equivalence_proof_log = (
+            "SAT proof finished - no model found: SUCCESS!\n"
+            "Equivalence successfully proven"
+        )
         equivalence = {
-            "schema_version": 3,
+            "schema_version": 4,
             "status": "pass",
+            "verdict": "proved",
+            "reason_code": None,
             "provider": "yosys_generic_synthesis_equivalence",
             "scope": "post_reset_observable_outputs_rtl_vs_generic_synthesized_netlist",
             "top": spec.name,
@@ -1939,9 +2155,78 @@ class PublishTests(unittest.TestCase):
             "proven_cells": 12,
             "rtl_sha256": content_hash(rtl),
             "sandbox_image": sandbox_ref,
+            "preparation": {
+                "schema_version": 1,
+                "top": spec.name,
+                "preparation_script": equivalence_preparation_script,
+                "preparation_script_sha256": hashlib.sha256(
+                    equivalence_preparation_script.encode()
+                ).hexdigest(),
+                "preparation_log": equivalence_preparation_log,
+                "preparation_log_sha256": hashlib.sha256(
+                    equivalence_preparation_log.encode()
+                ).hexdigest(),
+                "gold_netlist_sha256": "0" * 64,
+                "gate_netlist_sha256": "1" * 64,
+                "interfaces": {
+                    "gold": {
+                        "inputs": {
+                            port.name: port.width
+                            for port in spec.ports
+                            if port.direction == "input"
+                        },
+                        "outputs": {
+                            port.name: port.width
+                            for port in spec.ports
+                            if port.direction == "output"
+                        },
+                        "observable_input_dependency": {
+                            "clk": True,
+                            "rst_n": True,
+                            "enable": True,
+                        },
+                    },
+                    "gate": {
+                        "inputs": {
+                            port.name: port.width
+                            for port in spec.ports
+                            if port.direction == "input"
+                        },
+                        "outputs": {
+                            port.name: port.width
+                            for port in spec.ports
+                            if port.direction == "output"
+                        },
+                        "observable_input_dependency": {
+                            "clk": True,
+                            "rst_n": True,
+                            "enable": True,
+                        },
+                    },
+                },
+            },
+            "reset_observability": {
+                "port": "rst_n",
+                "gold_present": True,
+                "gate_present": True,
+                "gold_observable_dependency": True,
+                "gate_observable_dependency": True,
+            },
+            "proof_evidence": {
+                "script": equivalence_proof_script,
+                "script_sha256": hashlib.sha256(
+                    equivalence_proof_script.encode()
+                ).hexdigest(),
+                "log": equivalence_proof_log,
+                "log_sha256": hashlib.sha256(equivalence_proof_log.encode()).hexdigest(),
+                "reset_schedule_bound_to_miter": True,
+            },
         }
         independent_num_tests = spec.generation["independent_verify_tests"]
-        independent_trace = [{"count": 0} for _ in range(independent_num_tests)]
+        independent_trace = [
+            {"count": from_integer(0, 8)}
+            for _ in range(independent_num_tests)
+        ]
 
         def independent_run(index: int, offset: int) -> dict[str, object]:
             seed = spec.generation["seed"] + offset
@@ -1951,9 +2236,12 @@ class PublishTests(unittest.TestCase):
                 "num_tests": independent_num_tests,
                 "passed": True,
                 "verification": {
+                    "transcript_schema_version": 2,
                     "match_rate": 1.0,
                     "num_tests": independent_num_tests,
                     "total_checks": independent_num_tests,
+                    "compared_bits": independent_num_tests * 8,
+                    "masked_bits": 0,
                     "mismatched": 0,
                     "mismatches": [],
                     "sv_error": None,
@@ -2054,8 +2342,7 @@ class PublishTests(unittest.TestCase):
             "universal-execution-evidence.json": universal_execution,
             "synthesis-equivalence.json": equivalence,
             "synthesis-equivalence.log": (
-                "SAT proof finished - no model found: SUCCESS!\n"
-                "equivalence successfully proven\n"
+                equivalence_preparation_log + "\n" + equivalence_proof_log
             ),
             "formal-report.json": formal,
             "formal-properties.json": formal_properties,
@@ -2145,7 +2432,10 @@ class PublishTests(unittest.TestCase):
             pin_order = config.parent / "pin_order.cfg"
             self.assertTrue(pin_order.is_file())
             self.assertEqual(pin_order.stat().st_mode & 0o222, 0)
-            self.assertIn("count\\[\\d+\\]", pin_order.read_text())
+            pin_order_text = pin_order.read_text()
+            self.assertIn("#E\ncount\\[0\\]", pin_order_text)
+            self.assertIn("#N\ncount\\[4\\]", pin_order_text)
+            self.assertNotIn("count\\[\\d+\\]", pin_order_text)
             self.assertIn(
                 "IO_PIN_ORDER_CFG: dir::pin_order.cfg",
                 config.read_text(),
@@ -3497,6 +3787,34 @@ class PublishTests(unittest.TestCase):
             self.assertLess(len(encoded), 64 * 1024)
             self.assertNotIn(b'"payload"', encoded)
 
+    def test_silent_update_cannot_change_event_projection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = {
+                "run_id": "run-projection-event",
+                "state_file": str(root / "state.json"),
+                "events_file": str(root / "events.jsonl"),
+                "event_sequence": 0,
+                "status": "running",
+                "phase": "lane_running",
+            }
+            save_state(state)
+
+            _update(
+                state,
+                phase="lane_OpenROAD.GlobalPlacement",
+                announce=False,
+                record_event=False,
+            )
+
+            # A follow-up update reads and validates the journal first.  This
+            # would fail if the silent transition had not been journaled.
+            _update(state, elapsed_seconds=1, announce=False, record_event=False)
+            self.assertEqual(state["phase"], "lane_OpenROAD.GlobalPlacement")
+            self.assertEqual(state["event_sequence"], 1)
+            event = json.loads((root / "events.jsonl").read_text().strip())
+            self.assertEqual(event["phase"], "lane_OpenROAD.GlobalPlacement")
+
     def test_report_parser_accepts_monitor_compact_mode(self):
         args = build_parser().parse_args(
             ["report", "--run-id", "run-1", "--json", "--compact"]
@@ -3845,7 +4163,7 @@ class PublishTests(unittest.TestCase):
 
     def test_required_mapped_equivalence_accepts_complete_child_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             lane_run_id = "lane-required-eqy-pass"
             published_dir = root / "published-design"
             design_config = published_dir / "config.yaml"
@@ -3860,6 +4178,14 @@ class PublishTests(unittest.TestCase):
             )
             eqy_gate_tcl = eqy_script.with_name("demo-gate.tcl")
             eqy_gate_tcl.write_text(render_eqy_gate_tcl(), encoding="utf-8")
+            snapshot_root = root / "lane-agent" / lane_run_id / "input-snapshot"
+            snapshot_eqy_dir = snapshot_root / "eqy"
+            snapshot_eqy_dir.mkdir(parents=True)
+            snapshot_eqy_script = snapshot_eqy_dir / eqy_script.name
+            snapshot_eqy_script.write_bytes(eqy_script.read_bytes())
+            snapshot_eqy_gate_tcl = snapshot_eqy_dir / eqy_gate_tcl.name
+            snapshot_eqy_gate_tcl.write_bytes(eqy_gate_tcl.read_bytes())
+            input_bundle_sha256 = hashlib.sha256(b"synthetic-input-bundle").hexdigest()
             design_config.write_text(
                 "meta:\n"
                 "  version: 2\n"
@@ -3895,17 +4221,24 @@ class PublishTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def attestation(path: Path) -> dict:
-                return {
+            def attestation(path: Path, *, logical_path: Path | None = None) -> dict:
+                value = {
                     "path": str(path),
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                     "size_bytes": path.stat().st_size,
                 }
+                if logical_path is not None:
+                    value["logical_path"] = str(logical_path)
+                return value
 
             evidence_files = {
                 "config": attestation(config),
-                "eqy_script": attestation(eqy_script),
-                "eqy_gate_tcl": attestation(eqy_gate_tcl),
+                "eqy_script": attestation(
+                    snapshot_eqy_script, logical_path=eqy_script
+                ),
+                "eqy_gate_tcl": attestation(
+                    snapshot_eqy_gate_tcl, logical_path=eqy_gate_tcl
+                ),
                 "state_in": attestation(state_in),
                 "state_out": attestation(state_out),
                 "logs": [attestation(log)],
@@ -3972,6 +4305,7 @@ class PublishTests(unittest.TestCase):
                 ],
                 "design_dir": str(published_dir),
                 "design_config": str(design_config),
+                "lane_input_bundle_sha256": input_bundle_sha256,
             }
             (root / "pipeline.log").write_text("", encoding="utf-8")
             save_state(state)
@@ -3992,6 +4326,25 @@ class PublishTests(unittest.TestCase):
                         config_sha256=hashlib.sha256(
                             design_config.read_bytes()
                         ).hexdigest(),
+                        input_snapshot_dir=str(snapshot_root),
+                        input_bundle_attested=True,
+                        input_bundle_sha256=input_bundle_sha256,
+                        input_manifest={
+                            "schema_version": 2,
+                            "bundle_sha256": input_bundle_sha256,
+                            "files": [
+                                {
+                                    "path": f"eqy/{snapshot_eqy_script.name}",
+                                    "sha256": evidence_files["eqy_script"]["sha256"],
+                                    "size_bytes": evidence_files["eqy_script"]["size_bytes"],
+                                },
+                                {
+                                    "path": f"eqy/{snapshot_eqy_gate_tcl.name}",
+                                    "sha256": evidence_files["eqy_gate_tcl"]["sha256"],
+                                    "size_bytes": evidence_files["eqy_gate_tcl"]["size_bytes"],
+                                },
+                            ],
+                        },
                         librelane_run_dir=str(lane_run_dir),
                         step_history=[
                             {
@@ -4067,7 +4420,7 @@ class PublishTests(unittest.TestCase):
                     )
                 )
             )
-            self.assertEqual(current["status"], "completed")
+            self.assertEqual(current["status"], "completed", current)
             log.write_text("tampered after completion\n", encoding="utf-8")
             degraded = refresh_state(current)
 
@@ -4118,7 +4471,7 @@ class PublishTests(unittest.TestCase):
             self.assertEqual(current["elapsed_seconds"], 5)
 
     def test_child_start_clears_stale_parent_errors(self):
-        spec = load_spec(EXAMPLE)
+        spec = legacy_lane_spec()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = root / "config.yaml"
@@ -4159,7 +4512,7 @@ class PublishTests(unittest.TestCase):
             self.assertEqual(current["lane_attempts"][0]["status"], "running")
 
     def test_unknown_child_launch_reuses_the_same_idempotency_key(self):
-        spec = load_spec(EXAMPLE)
+        spec = legacy_lane_spec()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = root / "config.yaml"

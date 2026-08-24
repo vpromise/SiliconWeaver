@@ -6,7 +6,7 @@
 RTL-Closure is a self-contained natural-language RTL generation, verification,
 repair, and LibreLane handoff controller. It does not import an external
 RTL-generation runtime or invoke an ORFS integration. The current package
-version is 0.6.1.
+version is 0.7.0.
 
 It is the RTL engine in the Pi-Lane Agent stack. Benchmark datasets, comparison
 cases, hidden evaluation, scoring, and leaderboards are intentionally excluded;
@@ -25,7 +25,7 @@ Pi-Lane/Lane physical handoff protocol.
 RTL-Closure is released under Apache-2.0. See [`LICENSE`](LICENSE) and
 [`NOTICE`](NOTICE) for license and inference-design provenance.
 
-Pipeline (0.6):
+Pipeline (0.7):
 
 1. bind the explicit behavioral/interface contract, architecture constraints, requirements, and assumptions to a user-confirmed intent-closure hash;
 2. validate the bound JSON specification, then plan declaration-only directed scenarios;
@@ -41,7 +41,7 @@ Pipeline (0.6):
 12. prove explicitly declared safe port-level properties with symbolic inputs and Yosys temporal induction;
 13. run two release randomized passes plus exact-interface, policy, and Yosys gates; any behavioral counterexample re-enters the same bounded repair loop and full regression instead of bypassing closure;
 14. audit explicit architecture constraints and prove the RTL equivalent to its generic Yosys-synthesized netlist;
-15. replay the final active-suite quorum, stage and rehash every release artifact, publish read-only records, then start `lane-agent`.
+15. replay the final active-suite quorum, stage and rehash every release artifact, publish read-only records, optionally complete evidence-bound physical planning, then start the final `lane-agent` run.
 
 The repair model cannot generate or edit Cocotb, expected outputs, the Python
 oracle, the contract, or an existing test-suite epoch. Coverage refinement may
@@ -269,6 +269,23 @@ from the synthesized design and `FP_CORE_UTIL` instead of receiving a fixed
 `floorplan_sizing=absolute` and provide both `die_area` and `core_area`. Every publication also emits a stable,
 bus-grouped `pin_order.cfg` and references it through `IO_PIN_ORDER_CFG`.
 
+Physical planning is opt-in. `flow.physical_planning_mode` defaults to `off`;
+`auto_safe` starts the Pi-Lane planner before final physical implementation, and
+`reference_locked` additionally requires an absolute, regular, content-bound
+`reference_geometry_lock`. An optional absolute
+`physical_planning_policy` is hashed into the validated specification. Planning
+failures are classified as physical/infrastructure failures and cannot trigger
+another RTL repair request. The bundled Pi-Lane bootstrap policy is explicitly
+non-publishable and is not evidence of calibrated QoR, signoff, or tapeout
+readiness.
+
+Independent differential evidence now uses transcript schema 2 with canonical
+four-state values. Known Verilog bits are compared exactly; `X`/`Z` bits are
+retained with an explicit compare mask rather than coerced into ordinary binary
+values. Required bounded-formal replay fails closed for resetless state whose
+initial value cannot be bound, instead of treating an unconstrained initial
+state as a completed proof.
+
 Coverage reports deliberately distinguish planning association from observed
 or machine-evaluated evidence: attaching a requirement ID to a scenario is not
 a requirement hit. `oracle_line_coverage` is Python-oracle executable-line
@@ -292,7 +309,7 @@ it with `release_integrity/mapped_equivalence_evidence`. `status` and `report`
 remain pure reads, so the durable orchestrator must continue calling
 `reconcile` for this post-completion integrity check.
 
-The 0.6 release uses an OpenAI-compatible streaming API backend configured only
+The 0.7 release uses an OpenAI-compatible streaming API backend configured only
 through `RTL_CLOSURE_PROVIDER`, `RTL_CLOSURE_MODEL`, `RTL_CLOSURE_BASE_URL`, and
 `RTL_CLOSURE_API_KEY`. Standalone RTL-Closure does not read Pi state. When it is
 launched through `pi-lane`, the Pi-Lane launcher injects missing values into the

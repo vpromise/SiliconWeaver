@@ -710,7 +710,9 @@ def _validate_formal_release_evidence(
     elif batch_statuses:
         derived_status = "pass"
     elif expected_selection["unsupported_scenario_count"]:
-        derived_status = "pass"
+        # Explicitly unsupported trace semantics are a verification capability
+        # result, never a vacuous formal pass.
+        derived_status = "unsupported"
     else:
         derived_status = "unknown"
     selection_complete = bool(
@@ -1721,6 +1723,17 @@ def _read_process_identity(pid: int | None) -> dict[str, Any] | None:
         return None
 
 
+def _attest_spawned_process(pid: int, *, attempts: int = 20) -> dict[str, Any] | None:
+    """Wait briefly for /proc to expose a newly exec'd worker's identity."""
+    for attempt in range(attempts):
+        identity = _read_process_identity(pid)
+        if identity is not None:
+            return identity
+        if attempt + 1 < attempts:
+            time.sleep(0.01)
+    return None
+
+
 def _process_identity_matches(
     pid: int | None, expected: dict[str, Any] | None
 ) -> bool:
@@ -1844,7 +1857,7 @@ def _launch_pipeline_worker(state: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(state["error"]) from exc
 
     try:
-        identity = _read_process_identity(process.pid)
+        identity = _attest_spawned_process(process.pid)
         if identity is None:
             raise RuntimeError("pipeline worker identity could not be attested")
         state = _register_pipeline_worker_unlocked(
@@ -2009,7 +2022,9 @@ def start_pipeline(
             "worker_process": None,
             "launch_generation": 0,
             "launch_token_sha256": None,
-            "lane_run_id": None,
+        "lane_run_id": None,
+            "physical_planning_id": None,
+            "physical_planning": None,
             "lane_attempts": [],
             "active_lane_attempt_id": None,
             "started_at": now_iso(),
@@ -2051,6 +2066,16 @@ def _update(
                 raise RuntimeError("RTL-Closure state identity changed before update")
         _assert_active_worker_fence(current)
         previous_event_sha256 = _recover_event_journal_locked(current, state_file)
+        previous_projection = {
+            key: current.get(key)
+            for key in (
+                "status",
+                "phase",
+                "failure_class",
+                "failure_gate",
+                "failure_code",
+            )
+        }
         if (
             current.get("status") in TERMINAL_STATUSES
             and not allow_terminal_transition
@@ -2063,6 +2088,11 @@ def _update(
         if status is not None:
             current["status"] = status
         current.update(values)
+        # The journal is an authenticated projection of these fields.  A silent
+        # write that changes one of them makes every subsequent read fail closed
+        # because the durable state no longer matches the last journal event.
+        if any(current.get(key) != value for key, value in previous_projection.items()):
+            record_event = True
         if record_event:
             current["events_file"] = str(state_file.with_name("events.jsonl"))
             current["event_sequence"] = int(current.get("event_sequence", 0)) + 1
@@ -2860,12 +2890,18 @@ def _publish_design(
     proven_cells = synthesis_equivalence.get("proven_cells")
     equivalence_base = synthesis_equivalence.get("reset_base_case") or {}
     equivalence_semantics = synthesis_equivalence.get("comparison_semantics") or {}
+    equivalence_preparation = synthesis_equivalence.get("preparation")
+    equivalence_proof = synthesis_equivalence.get("proof_evidence")
+    reset_observability = synthesis_equivalence.get("reset_observability")
     expected_output_ports = sorted(
         port.name for port in spec.ports if port.direction == "output"
     )
     expected_output_bits = sum(
         port.width for port in spec.ports if port.direction == "output"
     )
+    expected_input_ports = {
+        port.name: port.width for port in spec.ports if port.direction == "input"
+    }
     supporting_internal_names = equivalence_semantics.get(
         "supporting_internal_match_names"
     )
@@ -2891,8 +2927,67 @@ def _publish_design(
         and equivalence_base.get("asserted_samples") == 0
         and equivalence_base.get("post_reset_samples") == 0
     )
+    preparation_valid = False
+    if isinstance(equivalence_preparation, dict):
+        interfaces = equivalence_preparation.get("interfaces")
+        gold = interfaces.get("gold") if isinstance(interfaces, dict) else None
+        gate = interfaces.get("gate") if isinstance(interfaces, dict) else None
+        preparation_script = equivalence_preparation.get("preparation_script")
+        preparation_log = equivalence_preparation.get("preparation_log")
+        if (
+            equivalence_preparation.get("schema_version") == 1
+            and equivalence_preparation.get("top") == spec.name
+            and isinstance(gold, dict)
+            and isinstance(gate, dict)
+            and gold.get("inputs") == expected_input_ports
+            and gate.get("inputs") == expected_input_ports
+            and gold.get("outputs")
+            == {port.name: port.width for port in spec.ports if port.direction == "output"}
+            and gate.get("outputs") == gold.get("outputs")
+            and isinstance(preparation_script, str)
+            and isinstance(preparation_log, str)
+            and equivalence_preparation.get("preparation_script_sha256")
+            == hashlib.sha256(preparation_script.encode()).hexdigest()
+            and equivalence_preparation.get("preparation_log_sha256")
+            == hashlib.sha256(preparation_log.encode()).hexdigest()
+            and all(
+                isinstance(equivalence_preparation.get(key), str)
+                and re.fullmatch(r"[0-9a-f]{64}", equivalence_preparation[key])
+                for key in ("gold_netlist_sha256", "gate_netlist_sha256")
+            )
+        ):
+            preparation_valid = True
+    proof_valid = False
+    if isinstance(equivalence_proof, dict):
+        proof_script = equivalence_proof.get("script")
+        proof_log = equivalence_proof.get("log")
+        if (
+            isinstance(proof_script, str)
+            and isinstance(proof_log, str)
+            and equivalence_proof.get("script_sha256")
+            == hashlib.sha256(proof_script.encode()).hexdigest()
+            and equivalence_proof.get("log_sha256")
+            == hashlib.sha256(proof_log.encode()).hexdigest()
+            and equivalence_log
+            == str(equivalence_preparation.get("preparation_log"))
+            + "\n"
+            + proof_log
+            and equivalence_proof.get("reset_schedule_bound_to_miter")
+            is (spec.reset is not None)
+        ):
+            proof_valid = True
+    reset_observability_valid = (
+        reset_observability is None
+        if spec.reset is None
+        else isinstance(reset_observability, dict)
+        and reset_observability.get("port") == spec.reset["port"]
+        and reset_observability.get("gold_present") is True
+        and reset_observability.get("gate_present") is True
+        and reset_observability.get("gold_observable_dependency") is True
+        and reset_observability.get("gate_observable_dependency") is True
+    )
     if (
-        synthesis_equivalence.get("schema_version") != 3
+        synthesis_equivalence.get("schema_version") != 4
         or synthesis_equivalence.get("status") != "pass"
         or synthesis_equivalence.get("provider")
         != "yosys_generic_synthesis_equivalence"
@@ -2915,6 +3010,9 @@ def _publish_design(
         or equivalence_semantics.get("reachable_state_base_proven")
         is not (spec.reset is not None)
         or not reset_base_valid
+        or not preparation_valid
+        or not proof_valid
+        or not reset_observability_valid
         or not re.search(r"Equivalence successfully proven", equivalence_log, re.I)
         or isinstance(equivalence_cells, bool)
         or not isinstance(equivalence_cells, int)
@@ -3270,6 +3368,8 @@ def _validate_lane_state_identity(
     expected_input_manifest: dict[str, Any] | None = None,
     expected_input_bundle_sha256: str | None = None,
     expected_integrity_audit_id: str | None = None,
+    expected_physical_plan_sha256: str | None = None,
+    expected_geometry_lock_sha256: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("lane-agent returned a non-object response")
@@ -3305,6 +3405,17 @@ def _validate_lane_state_identity(
         raise LaneInputIdentityError(
             "lane-agent response consumed a different immutable input bundle"
         )
+    if expected_physical_plan_sha256 is not None or expected_geometry_lock_sha256 is not None:
+        physical_plan = value.get("physical_plan")
+        if (
+            not isinstance(physical_plan, dict)
+            or physical_plan.get("plan_sha256") != expected_physical_plan_sha256
+            or physical_plan.get("geometry_lock_sha256")
+            != expected_geometry_lock_sha256
+        ):
+            raise LaneInputIdentityError(
+                "lane-agent response consumed a different frozen physical plan"
+            )
     release_integrity = value.get("release_integrity")
     delivery_attestation = value.get("delivery_attestation")
     if release_integrity is not None or delivery_attestation is not None:
@@ -3393,6 +3504,22 @@ def _active_lane_launch_key(state: dict[str, Any]) -> str | None:
     return None
 
 
+def _active_physical_plan_binding(
+    state: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    active_attempt_id = state.get("active_lane_attempt_id")
+    for attempt in reversed(state.get("lane_attempts") or []):
+        if not isinstance(attempt, dict) or attempt.get("attempt_id") != active_attempt_id:
+            continue
+        plan_hash = attempt.get("physical_plan_sha256")
+        geometry_hash = attempt.get("geometry_lock_sha256")
+        return (
+            plan_hash if isinstance(plan_hash, str) else None,
+            geometry_hash if isinstance(geometry_hash, str) else None,
+        )
+    return None, None
+
+
 def _start_lane_unlocked(spec: DesignSpec, state: dict[str, Any]) -> dict[str, Any]:
     if state.get("status") in TERMINAL_STATUSES:
         raise RuntimeError(
@@ -3448,6 +3575,13 @@ def _start_lane_unlocked(spec: DesignSpec, state: dict[str, Any]) -> dict[str, A
                 "pdk": spec.pdk,
                 "flow": spec.flow["name"],
                 "to": spec.flow["to"],
+                "physical_planning_mode": spec.flow["physical_planning_mode"],
+                "physical_planning_policy_sha256": spec.flow.get(
+                    "physical_planning_policy_sha256"
+                ),
+                "reference_geometry_lock_sha256": spec.flow.get(
+                    "reference_geometry_lock_sha256"
+                ),
             }
         )
         attempt = {
@@ -3469,6 +3603,92 @@ def _start_lane_unlocked(spec: DesignSpec, state: dict[str, Any]) -> dict[str, A
         lane_attempts=attempts,
         active_lane_attempt_id=attempt_id,
     )
+    if spec.flow["physical_planning_mode"] != "off":
+        plan_command = [
+            "lane-agent",
+            "plan-start",
+            "--config",
+            state["design_config"],
+            "--final-workflow-id",
+            str((state.get("origin") or {}).get("workflow_id") or state.get("run_id")),
+            "--final-attempt-id",
+            attempt_id,
+            "--final-idempotency-key",
+            launch_key,
+            "--idempotency-key",
+            launch_key + ":physical-plan",
+            "--json",
+        ]
+        if spec.flow["to"]:
+            plan_command.extend(["--final-to", spec.flow["to"]])
+        if spec.flow["jobs"]:
+            plan_command.extend(["--jobs", str(spec.flow["jobs"])])
+        if spec.flow.get("physical_planning_policy"):
+            plan_command.extend(
+                ["--policy", spec.flow["physical_planning_policy"]]
+            )
+        if spec.flow["physical_planning_mode"] == "reference_locked":
+            plan_command.extend(
+                ["--geometry-lock", spec.flow["reference_geometry_lock"]]
+            )
+        try:
+            planned = subprocess.run(
+                plan_command,
+                cwd=Path(state["design_config"]).parent,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            attempts[-1].update(
+                {"status": "launch_unknown", "completed_at": now_iso(), "error": str(exc)}
+            )
+            _update(state, lane_attempts=attempts, announce=False)
+            raise LaneLaunchError(f"could not start physical planning: {exc}") from exc
+        if planned.returncode != 0:
+            message = (planned.stderr or planned.stdout).strip()
+            attempts[-1].update(
+                {"status": "launch_unknown", "completed_at": now_iso(), "error": message}
+            )
+            _update(state, lane_attempts=attempts, announce=False)
+            raise LaneLaunchError(f"could not start physical planning: {message}")
+        try:
+            planning = json.loads(planned.stdout)
+            if (
+                not isinstance(planning, dict)
+                or not isinstance(planning.get("plan_id"), str)
+                or planning.get("status") not in {"launching", "running"}
+                or planning.get("config_path") != state["design_config"]
+                or planning.get("mode").replace("-", "_")
+                != spec.flow["physical_planning_mode"]
+            ):
+                raise ValueError("physical planning start identity is invalid")
+        except (AttributeError, json.JSONDecodeError, ValueError) as exc:
+            attempts[-1].update(
+                {"status": "launch_unknown", "completed_at": now_iso(), "error": str(exc)}
+            )
+            _update(state, lane_attempts=attempts, announce=False)
+            raise LaneLaunchError(
+                f"lane-agent returned invalid physical planning JSON: {exc}"
+            ) from exc
+        attempts[-1]["status"] = "physical_planning"
+        return _update(
+            state,
+            phase="physical_planning_" + str(planning.get("phase") or "running"),
+            status="running",
+            physical_planning_id=planning["plan_id"],
+            physical_planning=planning,
+            lane_attempts=attempts,
+            active_lane_attempt_id=attempt_id,
+            error=None,
+            failure=None,
+            lane_status_error=None,
+            failure_class=None,
+            failure_gate=None,
+            failure_code=None,
+            stop_requested=False,
+        )
     command = [
         "lane-agent",
         "start",
@@ -4089,6 +4309,11 @@ def worker(run_id: str, launch_generation: int, launch_token: str) -> int:
                 "log": str(equivalence_log_path),
             },
         )
+        if equivalence.get("status") != "pass":
+            raise RuntimeError(
+                "synthesis equivalence is not a release proof: "
+                + str(equivalence.get("reason_code") or equivalence.get("status"))
+            )
         verify_frozen_assets(
             contract=contract,
             plan=testplan,
@@ -4217,6 +4442,7 @@ def _mapped_equivalence_evidence_errors(
     expected_run_id: str,
     expected_pdk: str,
     expected_design_config: str | Path | None,
+    expected_input_bundle_sha256: str | None = None,
 ) -> list[str]:
     evidence = child.get("mapped_equivalence")
     if not isinstance(evidence, dict):
@@ -4258,6 +4484,8 @@ def _mapped_equivalence_evidence_errors(
     expected_eqy_script_sha256: str | None = None
     expected_eqy_gate_tcl_path: Path | None = None
     expected_eqy_gate_tcl_sha256: str | None = None
+    snapshot_root: Path | None = None
+    snapshot_files: dict[str, dict[str, Any]] = {}
     if not isinstance(expected_design_config, (str, Path)) or not str(
         expected_design_config
     ):
@@ -4376,6 +4604,68 @@ def _mapped_equivalence_evidence_errors(
                         errors.append("published EQY gate Tcl identity is invalid")
                     else:
                         expected_eqy_gate_tcl_path = gate_tcl_resolved
+
+    raw_snapshot_root = child.get("input_snapshot_dir")
+    if raw_snapshot_root is not None:
+        if not isinstance(raw_snapshot_root, str) or not raw_snapshot_root:
+            errors.append("Lane input snapshot directory is invalid")
+        else:
+            snapshot_candidate = Path(raw_snapshot_root)
+            try:
+                snapshot_resolved = snapshot_candidate.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError):
+                snapshot_resolved = None
+            if (
+                snapshot_resolved is None
+                or not snapshot_candidate.is_absolute()
+                or snapshot_candidate != snapshot_resolved
+                or snapshot_candidate.is_symlink()
+                or not snapshot_resolved.is_dir()
+                or snapshot_resolved.name != "input-snapshot"
+                or snapshot_resolved.parent.name != expected_run_id
+            ):
+                errors.append("Lane input snapshot directory is invalid")
+            else:
+                snapshot_root = snapshot_resolved
+                if child.get("input_bundle_attested") is not True:
+                    errors.append("Lane input snapshot is not attested")
+                observed_bundle_sha256 = child.get("input_bundle_sha256")
+                if not isinstance(observed_bundle_sha256, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", observed_bundle_sha256
+                ):
+                    errors.append("Lane input snapshot bundle identity is invalid")
+                elif (
+                    expected_input_bundle_sha256 is not None
+                    and observed_bundle_sha256 != expected_input_bundle_sha256
+                ):
+                    errors.append("Lane input snapshot does not match the published bundle")
+                manifest = child.get("input_manifest")
+                rows = manifest.get("files") if isinstance(manifest, dict) else None
+                if (
+                    not isinstance(manifest, dict)
+                    or manifest.get("schema_version") != 2
+                    or manifest.get("bundle_sha256") != observed_bundle_sha256
+                    or not isinstance(rows, list)
+                ):
+                    errors.append("Lane input snapshot manifest is invalid")
+                else:
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        path = row.get("path")
+                        digest = row.get("sha256")
+                        size = row.get("size_bytes")
+                        if (
+                            isinstance(path, str)
+                            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path)
+                            and isinstance(digest, str)
+                            and re.fullmatch(r"[0-9a-f]{64}", digest)
+                            and isinstance(size, int)
+                            and not isinstance(size, bool)
+                            and size > 0
+                            and path not in snapshot_files
+                        ):
+                            snapshot_files[path] = row
 
     raw_run_dir = evidence.get("run_dir")
     run_dir: Path | None = None
@@ -4517,6 +4807,64 @@ def _mapped_equivalence_evidence_errors(
             return None
         return resolved
 
+    def attest_eqy_source(
+        value: Any,
+        *,
+        label: str,
+        expected_publication_path: Path | None,
+        expected_sha256: str | None,
+    ) -> Path | None:
+        if not isinstance(value, dict):
+            errors.append(f"mapped-equivalence {label} evidence is missing")
+            return None
+        raw_path = value.get("path")
+        if (
+            expected_publication_path is not None
+            and raw_path == str(expected_publication_path)
+        ):
+            path = attest_file(
+                value,
+                label=label,
+                expected_parent=expected_publication_path.parent,
+                expected_name=expected_publication_path.name,
+                maximum_bytes=1024 * 1024,
+                allowed_root=expected_design_dir,
+            )
+        else:
+            relative_path = (
+                f"eqy/{expected_publication_path.name}"
+                if expected_publication_path is not None
+                else None
+            )
+            if snapshot_root is None or relative_path is None:
+                errors.append(f"mapped-equivalence {label} is not a published or attested snapshot file")
+                return None
+            path = attest_file(
+                value,
+                label=label,
+                expected_parent=snapshot_root / "eqy",
+                expected_name=expected_publication_path.name,
+                maximum_bytes=1024 * 1024,
+                allowed_root=snapshot_root,
+            )
+            manifest_entry = snapshot_files.get(relative_path)
+            if (
+                value.get("logical_path") != str(expected_publication_path)
+                or not isinstance(manifest_entry, dict)
+                or manifest_entry.get("sha256") != value.get("sha256")
+                or manifest_entry.get("size_bytes") != value.get("size_bytes")
+            ):
+                errors.append(f"mapped-equivalence {label} snapshot binding is invalid")
+        if (
+            path is not None
+            and (
+                expected_sha256 is None
+                or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256
+            )
+        ):
+            errors.append(f"mapped-equivalence {label} hash does not match publication")
+        return path
+
     bundle = evidence.get("evidence")
     bundle = bundle if isinstance(bundle, dict) else {}
     config_path = attest_file(
@@ -4525,56 +4873,18 @@ def _mapped_equivalence_evidence_errors(
         expected_parent=step_dir,
         expected_name="config.json",
     )
-    eqy_script_path = attest_file(
+    attest_eqy_source(
         bundle.get("eqy_script"),
         label="EQY script",
-        expected_parent=(
-            expected_eqy_script_path.parent
-            if expected_eqy_script_path is not None
-            else None
-        ),
-        expected_name=(
-            expected_eqy_script_path.name
-            if expected_eqy_script_path is not None
-            else None
-        ),
-        maximum_bytes=1024 * 1024,
-        allowed_root=expected_design_dir,
+        expected_publication_path=expected_eqy_script_path,
+        expected_sha256=expected_eqy_script_sha256,
     )
-    if (
-        eqy_script_path is not None
-        and (
-            eqy_script_path != expected_eqy_script_path
-            or hashlib.sha256(eqy_script_path.read_bytes()).hexdigest()
-            != expected_eqy_script_sha256
-        )
-    ):
-        errors.append("mapped-equivalence EQY script hash does not match publication")
-    eqy_gate_tcl_path = attest_file(
+    attest_eqy_source(
         bundle.get("eqy_gate_tcl"),
         label="EQY gate Tcl",
-        expected_parent=(
-            expected_eqy_gate_tcl_path.parent
-            if expected_eqy_gate_tcl_path is not None
-            else None
-        ),
-        expected_name=(
-            expected_eqy_gate_tcl_path.name
-            if expected_eqy_gate_tcl_path is not None
-            else None
-        ),
-        maximum_bytes=1024 * 1024,
-        allowed_root=expected_design_dir,
+        expected_publication_path=expected_eqy_gate_tcl_path,
+        expected_sha256=expected_eqy_gate_tcl_sha256,
     )
-    if (
-        eqy_gate_tcl_path is not None
-        and (
-            eqy_gate_tcl_path != expected_eqy_gate_tcl_path
-            or hashlib.sha256(eqy_gate_tcl_path.read_bytes()).hexdigest()
-            != expected_eqy_gate_tcl_sha256
-        )
-    ):
-        errors.append("mapped-equivalence EQY gate Tcl hash does not match publication")
     state_in_path = attest_file(
         bundle.get("state_in"),
         label="state_in",
@@ -4626,7 +4936,11 @@ def _mapped_equivalence_evidence_errors(
             or config["meta"].get("step") != "Yosys.EQY"
             or config.get("PDK") != expected_pdk
             or config.get("EQY_SCRIPT")
-            != (str(eqy_script_path) if eqy_script_path is not None else None)
+            != (
+                str(expected_eqy_script_path)
+                if expected_eqy_script_path is not None
+                else None
+            )
         ):
             errors.append("mapped-equivalence Step config does not bind Step/PDK/EQY_SCRIPT")
     for label, path in (("state_in", state_in_path), ("state_out", state_out_path)):
@@ -4765,6 +5079,9 @@ def _refresh_state_unlocked(
         lane_state_value = state.get("lane_state")
         if publication is not None and isinstance(lane_state_value, dict):
             origin = state.get("origin") or {}
+            expected_plan_hash, expected_geometry_hash = _active_physical_plan_binding(
+                state
+            )
             lane_input_mismatch = (
                 state.get("failure_code")
                 == "release_integrity/lane_input_mismatch"
@@ -4797,6 +5114,8 @@ def _refresh_state_unlocked(
                     if lane_input_mismatch
                     else publication["lane_input_bundle_sha256"]
                 ),
+                expected_physical_plan_sha256=expected_plan_hash,
+                expected_geometry_lock_sha256=expected_geometry_hash,
             )
         if (
             isinstance(lane_state_value, dict)
@@ -4808,6 +5127,7 @@ def _refresh_state_unlocked(
                 expected_run_id=str(state.get("lane_run_id") or ""),
                 expected_pdk=str(state.get("pdk") or ""),
                 expected_design_config=state.get("design_config"),
+                expected_input_bundle_sha256=state.get("lane_input_bundle_sha256"),
             )
             if equivalence_errors:
                 lane_state = dict(lane_state_value)
@@ -4842,6 +5162,195 @@ def _refresh_state_unlocked(
     completed_parent = state.get("status") == "completed"
     reconcile_succeeded = False
     lane_run_id = state.get("lane_run_id")
+    planning_pending = False
+    planning_id = state.get("physical_planning_id")
+    if planning_id and not lane_run_id:
+        try:
+            planned = subprocess.run(
+                [
+                    "lane-agent",
+                    "plan-status",
+                    "--plan-id",
+                    str(planning_id),
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            changes["lane_status_error"] = f"physical planner status unavailable: {exc}"
+            phase = "physical_planning_status_unknown"
+            planning_pending = True
+            record_event = state.get("lane_status_error") != changes["lane_status_error"]
+        else:
+            if planned.returncode != 0 and not planned.stdout.strip():
+                changes["lane_status_error"] = (
+                    planned.stderr.strip() or "physical planner status failed"
+                )
+                phase = "physical_planning_status_unknown"
+                planning_pending = True
+                record_event = state.get("lane_status_error") != changes["lane_status_error"]
+            else:
+                try:
+                    planning = json.loads(planned.stdout)
+                    if (
+                        not isinstance(planning, dict)
+                        or planning.get("plan_id") != planning_id
+                        or planning.get("config_path") != state.get("design_config")
+                        or planning.get("status")
+                        not in {"launching", "running", "completed", "failed", "stopped"}
+                    ):
+                        raise ValueError("physical planning status identity is invalid")
+                    expected_mode = _load_frozen_spec(state).flow[
+                        "physical_planning_mode"
+                    ]
+                    if str(planning.get("mode") or "").replace("-", "_") != expected_mode:
+                        raise ValueError("physical planning mode identity changed")
+                except (json.JSONDecodeError, ValueError) as exc:
+                    changes["lane_status_error"] = (
+                        f"lane-agent returned invalid physical planning JSON: {exc}"
+                    )
+                    phase = "physical_planning_status_unknown"
+                    planning_pending = True
+                    record_event = state.get("lane_status_error") != changes[
+                        "lane_status_error"
+                    ]
+                else:
+                    previous_planning = state.get("physical_planning") or {}
+                    changes["physical_planning"] = planning
+                    changes["lane_status_error"] = None
+                    record_event = (
+                        previous_planning.get("phase") != planning.get("phase")
+                        or previous_planning.get("lane_active_step")
+                        != planning.get("lane_active_step")
+                        or previous_planning.get("status") != planning.get("status")
+                    )
+                    if planning["status"] in {"launching", "running"}:
+                        planning_pending = True
+                        phase = "physical_planning_" + str(
+                            planning.get("phase") or "running"
+                        )
+                    elif planning["status"] == "failed":
+                        status = "failed"
+                        phase = "failed"
+                        error = planning.get("error") or {}
+                        changes.update(
+                            {
+                                "error": str(
+                                    error.get("message")
+                                    or "tool-driven physical planning failed"
+                                ),
+                                "failure_class": "physical_planning",
+                                "failure_gate": "physical_planning",
+                                "failure_code": "physical_planning/no_robust_geometry",
+                                "failure": {
+                                    "code": str(
+                                        error.get("code")
+                                        or "PHYSICAL_PLANNING_FAILED"
+                                    ),
+                                    "category": "physical_planning",
+                                    "domain": "physical_tool",
+                                    "repairable": False,
+                                    "repairable_by_rtl": False,
+                                    "retryable": False,
+                                    "user_action_required": True,
+                                    "message": str(
+                                        error.get("message")
+                                        or "tool-driven physical planning failed"
+                                    ),
+                                },
+                            }
+                        )
+                        attempts = [
+                            dict(row)
+                            for row in state.get("lane_attempts") or []
+                            if isinstance(row, dict)
+                        ]
+                        for attempt in reversed(attempts):
+                            if attempt.get("attempt_id") == state.get(
+                                "active_lane_attempt_id"
+                            ):
+                                attempt.update(
+                                    {
+                                        "status": "failed",
+                                        "completed_at": attempt.get("completed_at")
+                                        or now_iso(),
+                                        "error": changes["error"],
+                                    }
+                                )
+                                break
+                        changes["lane_attempts"] = attempts
+                        record_event = True
+                    elif planning["status"] == "stopped":
+                        status = "stopped"
+                        phase = "stopped"
+                        record_event = True
+                    else:
+                        final_lane_run_id = planning.get("final_lane_run_id")
+                        if (
+                            not isinstance(final_lane_run_id, str)
+                            or RUN_ID_RE.fullmatch(final_lane_run_id) is None
+                            or not isinstance(planning.get("plan_sha256"), str)
+                            or re.fullmatch(r"[0-9a-f]{64}", planning["plan_sha256"])
+                            is None
+                            or not isinstance(
+                                planning.get("geometry_lock_sha256"), str
+                            )
+                            or re.fullmatch(
+                                r"[0-9a-f]{64}",
+                                planning["geometry_lock_sha256"],
+                            )
+                            is None
+                        ):
+                            status = "failed"
+                            phase = "failed"
+                            changes.update(
+                                {
+                                    "error": "completed physical planning has no authenticated final Lane launch",
+                                    "failure_class": "physical_planning",
+                                    "failure_gate": "physical_planning_handoff",
+                                    "failure_code": "physical_planning/final_handoff",
+                                }
+                            )
+                            record_event = True
+                        else:
+                            lane_run_id = final_lane_run_id
+                            changes["lane_run_id"] = lane_run_id
+                            attempts = [
+                                dict(row)
+                                for row in state.get("lane_attempts") or []
+                                if isinstance(row, dict)
+                            ]
+                            matching = next(
+                                (
+                                    row
+                                    for row in reversed(attempts)
+                                    if row.get("attempt_id")
+                                    == state.get("active_lane_attempt_id")
+                                ),
+                                None,
+                            )
+                            if matching is None:
+                                raise ValueError(
+                                    "physical planning handoff has no Lane attempt"
+                                )
+                            matching.update(
+                                {
+                                    "lane_run_id": lane_run_id,
+                                    "status": "running",
+                                    "physical_plan_sha256": planning[
+                                        "plan_sha256"
+                                    ],
+                                    "geometry_lock_sha256": planning[
+                                        "geometry_lock_sha256"
+                                    ],
+                                }
+                            )
+                            changes["lane_attempts"] = attempts
+                            phase = "lane_running"
+                            record_event = True
     if lane_run_id:
         lane_command = [
             "lane-agent",
@@ -4877,6 +5386,9 @@ def _refresh_state_unlocked(
             lane_payload: Any = None
             try:
                 origin = state.get("origin") or {}
+                expected_plan_hash, expected_geometry_hash = (
+                    _active_physical_plan_binding(state)
+                )
                 lane_payload = json.loads(completed.stdout)
                 lane_state = _validate_lane_state_identity(
                     lane_payload,
@@ -4903,6 +5415,8 @@ def _refresh_state_unlocked(
                         else None
                     ),
                     expected_integrity_audit_id=integrity_audit_id,
+                    expected_physical_plan_sha256=expected_plan_hash,
+                    expected_geometry_lock_sha256=expected_geometry_hash,
                 )
                 reconcile_succeeded = True
                 changes["lane_state"] = lane_state
@@ -4966,6 +5480,7 @@ def _refresh_state_unlocked(
                             expected_run_id=str(lane_run_id),
                             expected_pdk=str(state.get("pdk") or ""),
                             expected_design_config=state.get("design_config"),
+                            expected_input_bundle_sha256=state.get("lane_input_bundle_sha256"),
                         )
                     elif equivalence_mode not in {"off", "required"}:
                         equivalence_errors = [
@@ -5074,7 +5589,12 @@ def _refresh_state_unlocked(
                 "lane_status_error"
             ]
             phase = "lane_status_unknown"
-    elif state["status"] == "running" and not _worker_alive(state):
+    elif (
+        state["status"] == "running"
+        and not planning_pending
+        and status is None
+        and not _worker_alive(state)
+    ):
         status = "failed"
         phase = "failed"
         record_event = True
@@ -5305,6 +5825,54 @@ def stop_pipeline(run_id: str | None) -> dict[str, Any]:
                 return _degrade_completed_publication(state, publication_error)
             return state
 
+        planning_id = state.get("physical_planning_id")
+        planning = state.get("physical_planning") or {}
+        if planning_id and not state.get("lane_run_id") and planning.get("status") in {
+            "launching",
+            "running",
+        }:
+            try:
+                stopped = subprocess.run(
+                    [
+                        "lane-agent",
+                        "plan-stop",
+                        "--plan-id",
+                        str(planning_id),
+                        "--json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError(f"could not stop physical planning: {exc}") from exc
+            if stopped.returncode != 0:
+                message = (stopped.stderr or stopped.stdout).strip()
+                raise RuntimeError(f"could not stop physical planning: {message}")
+            try:
+                stopped_plan = json.loads(stopped.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"lane-agent returned invalid physical planning stop JSON: {exc}"
+                ) from exc
+            if (
+                not isinstance(stopped_plan, dict)
+                or stopped_plan.get("plan_id") != planning_id
+                or stopped_plan.get("status") != "stopped"
+            ):
+                raise RuntimeError("physical planning stop was not confirmed")
+            return _update(
+                state,
+                status="stopped",
+                phase="stopped",
+                stop_requested=True,
+                physical_planning=stopped_plan,
+                elapsed_seconds=max(
+                    0, round(time.time() - float(state["started_epoch"]))
+                ),
+            )
+
         lane_run_id = state.get("lane_run_id")
         if lane_run_id:
             try:
@@ -5329,6 +5897,9 @@ def stop_pipeline(run_id: str | None) -> dict[str, Any]:
                 ).strip()
                 raise RuntimeError(f"could not stop LibreLane: {message}")
             origin = state.get("origin") or {}
+            expected_plan_hash, expected_geometry_hash = _active_physical_plan_binding(
+                state
+            )
             validate_expected_inputs = not preserve_integrity_failure
             try:
                 child = _validate_lane_state_identity(
@@ -5355,6 +5926,8 @@ def stop_pipeline(run_id: str | None) -> dict[str, Any]:
                         if publication is not None and validate_expected_inputs
                         else None
                     ),
+                    expected_physical_plan_sha256=expected_plan_hash,
+                    expected_geometry_lock_sha256=expected_geometry_hash,
                 )
             except (json.JSONDecodeError, ValueError) as exc:
                 raise RuntimeError(
@@ -5529,6 +6102,7 @@ def build_report(
     if not 1 <= log_lines <= 200:
         raise ValueError("log_lines must be from 1 to 200")
     child = state.get("lane_state") or {}
+    planning = state.get("physical_planning") or {}
     errors: list[str] = []
     for value in (state.get("error"), state.get("lane_status_error")):
         if value:
@@ -5861,6 +6435,8 @@ def build_report(
         "last_integrity_audit_id": state.get("last_integrity_audit_id"),
         "assurance": assurance,
         "lane_run_id": state.get("lane_run_id"),
+        "physical_planning_id": state.get("physical_planning_id"),
+        "physical_planning": planning,
         "active_lane_attempt_id": state.get("active_lane_attempt_id"),
         "lane_attempts": lane_attempts,
         "origin": state.get("origin"),
@@ -6246,6 +6822,20 @@ def format_state(state: dict[str, Any]) -> str:
         )
     if state.get("design_config"):
         lines.append(f"design_config: {state['design_config']}")
+    planning = state.get("physical_planning") or {}
+    if planning:
+        lines.extend(
+            [
+                f"physical_planning_id: {planning.get('plan_id')}",
+                f"physical_planning_status: {planning.get('status')}",
+                f"physical_planning_phase: {planning.get('phase')}",
+                f"physical_planning_lane_run: {planning.get('active_lane_run_id') or '-'}",
+                f"physical_planning_lane_step: {planning.get('lane_active_step') or planning.get('lane_last_completed_step') or '-'}",
+                "physical_planning_candidates: "
+                f"{planning.get('completed_candidate_count', 0)}/"
+                f"{planning.get('candidate_count', 0)}",
+            ]
+        )
     if state.get("error"):
         if state.get("failure_class"):
             lines.append(f"failure_class: {state['failure_class']}")

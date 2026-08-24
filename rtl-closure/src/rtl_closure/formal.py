@@ -1035,7 +1035,11 @@ def run_bounded_trace_formal(
     if not properties:
         if property_selection["unsupported_scenario_count"]:
             report = {
-                "status": "pass",
+                # A resetless/continuous-state trace can be useful simulation
+                # coverage, but it is not a bounded formal proof.  In
+                # particular, never represent this capability limit as pass:
+                # required formal and publication must fail closed on it.
+                "status": "unsupported",
                 "provider": "yosys_bounded_trace",
                 "authoritative": True,
                 "detail": (
@@ -1049,6 +1053,7 @@ def run_bounded_trace_formal(
                 "infrastructure_errors_present": False,
                 "infrastructure_error_count": 0,
                 "infrastructure_statuses": [],
+                "reason_code": "resetless_unconstrained_initial_state",
             }
         else:
             error = _formal_error(
@@ -1642,11 +1647,19 @@ def merge_formal_result(
             }
         )
         result.setdefault("actual_trace", []).extend(formal_trace)
-    elif status in {"unknown", "error"} and required:
+    elif status in {"unknown", "error", "unsupported"} and required:
+        category = "capability" if status == "unsupported" else "infrastructure"
         error = formal.get("error") or _formal_error(
-            f"formal_provider_{status}",
-            "infrastructure",
+            (
+                "formal_unsupported"
+                if status == "unsupported"
+                else f"formal_provider_{status}"
+            ),
+            category,
             str(formal.get("detail") or f"formal provider returned {status}"),
+            unsupported_scenarios=(formal.get("property_selection") or {}).get(
+                "unsupported_scenarios", []
+            ),
         )
         result["formal"]["error"] = error
         result.update(

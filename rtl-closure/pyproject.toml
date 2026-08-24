@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rtl-closure"
-version = "0.6.1"
+version = "0.7.0"
 description = "SiliconWeaver engine for verified RTL generation, repair, and publication"
 readme = "README.md"
 license = "Apache-2.0"

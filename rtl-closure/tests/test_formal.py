@@ -37,6 +37,7 @@ from rtl_closure.repair import (
     repair_loop,
 )
 from rtl_closure.adaptive import suite_hash
+from rtl_closure.logic_value import from_integer
 from rtl_closure.verification import VERIFY_IMAGE, generate_expected_trace
 
 
@@ -837,6 +838,62 @@ class FormalPropertyQuotaTests(unittest.TestCase):
             selection["unsupported_scenarios"][0]["reason_code"],
             "resetless_initial_state_unconstrained",
         )
+
+    def test_resetless_required_formal_is_unsupported_not_vacuously_passed(self):
+        raw = json.loads(EXAMPLE.read_text())
+        raw["design"].pop("reset")
+        raw["verification"] = {"formal_mode": "required", "verilator_lint": False}
+        spec = validate_spec(raw)
+        plan = {
+            "scenarios": [
+                {
+                    "id": "RESETLESS",
+                    "requirement_ids": ["REQ_STATE"],
+                    "reset_before": True,
+                    "cycles": [{"drive": {"enable": 1}}],
+                }
+            ]
+        }
+        expected = {
+            "trace": [
+                {
+                    "scenario_index": 0,
+                    "scenario_id": "RESETLESS",
+                    "cycle": 0,
+                    "inputs": {"enable": 1},
+                    "expected": {"count": 1},
+                }
+            ],
+            "setup_observations": [],
+        }
+        simulation = {
+            "passed": True,
+            "total_checks": 1,
+            "mismatched": 0,
+            "passed_check_ids": ["sim:RESETLESS"],
+            "mismatches": [],
+            "actual_trace": [],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            report = run_bounded_trace_formal(
+                spec,
+                GOOD_RTL,
+                plan,
+                expected,
+                Path(temp),
+                depth=1,
+                timeout=30,
+            )
+
+        self.assertEqual(report["status"], "unsupported")
+        self.assertFalse(report["selection_complete"])
+        self.assertFalse(report["evidence_complete"])
+        merged = merge_formal_result(
+            simulation, report, {"requirements": []}, plan, required=True
+        )
+        self.assertFalse(merged["passed"])
+        self.assertEqual(merged["failure_class"], "formal_unsupported")
+        self.assertFalse(merged["verification_error"]["repairable"])
 
 
 def docker_ready() -> bool:
@@ -1857,17 +1914,26 @@ class IndependentClosureTests(unittest.TestCase):
 
     def test_malformed_independent_transcript_stops_before_rtl_repair(self):
         valid = {
+            "transcript_schema_version": 2,
             "match_rate": 1.0,
             "num_tests": 2,
             "total_checks": 2,
+            "compared_bits": 2,
+            "masked_bits": 0,
             "mismatched": 0,
             "mismatches": [],
             "sv_error": None,
             "py_error": None,
             "meta_error": None,
             "stimuli": [{}, {}],
-            "verilog_trace": [{"y": 0}, {"y": 0}],
-            "python_trace": [{"y": 0}, {"y": 0}],
+            "verilog_trace": [
+                {"y": from_integer(0, 1)},
+                {"y": from_integer(0, 1)},
+            ],
+            "python_trace": [
+                {"y": from_integer(0, 1)},
+                {"y": from_integer(0, 1)},
+            ],
         }
 
         def missing_output(result):
@@ -1892,14 +1958,14 @@ class IndependentClosureTests(unittest.TestCase):
         def extra_mismatch_field(result):
             result["match_rate"] = 0.5
             result["mismatched"] = 1
-            result["python_trace"][0]["y"] = 1
+            result["python_trace"][0]["y"] = from_integer(1, 1)
             result["mismatches"] = [
                 {
                     "test": 0,
                     "signal": "y",
                     "width": 1,
-                    "verilog": 0,
-                    "python": 1,
+                    "verilog": from_integer(0, 1),
+                    "python": from_integer(1, 1),
                     "inputs": {},
                     "untrusted": True,
                 }
@@ -2040,17 +2106,20 @@ endmodule"""
             False,
         )
         failure = {
+            "transcript_schema_version": 2,
             "match_rate": 0.5,
             "num_tests": 2,
             "total_checks": 2,
+            "compared_bits": 2,
+            "masked_bits": 0,
             "mismatched": 1,
             "mismatches": [
                 {
                     "test": 1,
                     "signal": "y",
                     "width": 1,
-                    "verilog": 0,
-                    "python": 1,
+                    "verilog": from_integer(0, 1),
+                    "python": from_integer(1, 1),
                     "inputs": {},
                 }
             ],
@@ -2058,21 +2127,36 @@ endmodule"""
             "py_error": None,
             "meta_error": None,
             "stimuli": [{}, {}],
-            "verilog_trace": [{"y": 0}, {"y": 0}],
-            "python_trace": [{"y": 0}, {"y": 1}],
+            "verilog_trace": [
+                {"y": from_integer(0, 1)},
+                {"y": from_integer(0, 1)},
+            ],
+            "python_trace": [
+                {"y": from_integer(0, 1)},
+                {"y": from_integer(1, 1)},
+            ],
         }
         passed = {
+            "transcript_schema_version": 2,
             "match_rate": 1.0,
             "num_tests": 2,
             "total_checks": 2,
+            "compared_bits": 2,
+            "masked_bits": 0,
             "mismatched": 0,
             "mismatches": [],
             "sv_error": None,
             "py_error": None,
             "meta_error": None,
             "stimuli": [{}, {}],
-            "verilog_trace": [{"y": 0}, {"y": 1}],
-            "python_trace": [{"y": 0}, {"y": 1}],
+            "verilog_trace": [
+                {"y": from_integer(0, 1)},
+                {"y": from_integer(1, 1)},
+            ],
+            "python_trace": [
+                {"y": from_integer(0, 1)},
+                {"y": from_integer(1, 1)},
+            ],
             # These untrusted fields must remain nested and cannot replace the
             # controller's run envelope.
             "run": 999,

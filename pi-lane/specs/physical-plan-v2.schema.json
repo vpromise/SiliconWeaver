@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/pi-lane/physical-plan-v2.schema.json",
+  "title": "Pi-Lane frozen physical plan v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "kind", "status", "publishable", "plan_id", "created_at",
+    "config_sha256", "input_bundle_sha256", "pdk", "pdk_revision",
+    "pdk_integrity_sha256", "image_digest", "librelane_version",
+    "flow_registry_version", "policy", "policy_sha256", "synthesis_baseline",
+    "candidates", "candidate_domain_sha256", "candidate_domain_count",
+    "search_complete", "selected_candidate_id", "io_lock_sha256", "geometry_lock",
+    "geometry_lock_sha256", "plan_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "kind": {"const": "pi-lane-physical-plan"},
+    "status": {"const": "completed"},
+    "publishable": {"type": "boolean"},
+    "plan_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$"},
+    "created_at": {"type": "string"},
+    "config_sha256": {"$ref": "#/$defs/hash"},
+    "input_bundle_sha256": {"$ref": "#/$defs/hash"},
+    "pdk": {"enum": ["sky130A", "gf180mcuD", "ihp-sg13g2"]},
+    "pdk_revision": {"type": "string", "minLength": 1},
+    "pdk_integrity_sha256": {"$ref": "#/$defs/hash"},
+    "image_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "librelane_version": {"const": "3.0.5"},
+    "flow_registry_version": {"const": "librelane-3.0.5-classic-v1"},
+    "policy": {"type": "object"},
+    "policy_sha256": {"$ref": "#/$defs/hash"},
+    "synthesis_baseline": {"type": "object"},
+    "candidates": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "candidate_domain_sha256": {"$ref": "#/$defs/hash"},
+    "candidate_domain_count": {"type": "integer", "minimum": 1},
+    "search_complete": {"const": true},
+    "selected_candidate_id": {"type": "string", "minLength": 1},
+    "io_lock_sha256": {"$ref": "#/$defs/hash"},
+    "geometry_lock": {"$ref": "#/$defs/geometry"},
+    "geometry_lock_sha256": {"$ref": "#/$defs/hash"},
+    "plan_sha256": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "coordinate": {"type": "number", "minimum": 0},
+    "area": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "prefixItems": [
+        {"$ref": "#/$defs/coordinate"}, {"$ref": "#/$defs/coordinate"},
+        {"$ref": "#/$defs/coordinate"}, {"$ref": "#/$defs/coordinate"}
+      ],
+      "items": false
+    },
+    "geometry": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema_version", "floorplan_sizing", "die_area", "core_area",
+        "observed_die_bbox", "observed_core_bbox", "dominant_constraint",
+        "minimum_geometry_classification", "selection_rule"
+      ],
+      "properties": {
+        "schema_version": {"const": 2},
+        "floorplan_sizing": {"const": "absolute"},
+        "die_area": {"$ref": "#/$defs/area"},
+        "core_area": {"$ref": "#/$defs/area"},
+        "observed_die_bbox": {"$ref": "#/$defs/area"},
+        "observed_core_bbox": {"$ref": "#/$defs/area"},
+        "dominant_constraint": {"enum": ["logic", "pdn", "io", "macro", "grid", "timing", "mixed"]},
+        "minimum_geometry_classification": {"type": "object"},
+        "selection_rule": {
+          "enum": [
+            "sealed-domain-minimum-robust-v2",
+            "sealed-domain-timing-qualified-minimum-robust-v3"
+          ]
+        }
+      }
+    }
+  }
+}
