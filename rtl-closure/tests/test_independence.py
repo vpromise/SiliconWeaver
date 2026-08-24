@@ -44,7 +44,7 @@ class IndependenceTests(unittest.TestCase):
         project = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(
             project["project"]["dependencies"],
-            ["openai>=1.0,<3", "PyYAML>=5,<7"],
+            ["openai>=3.3.1,<4", "PyYAML>=5,<7"],
         )
 
     def test_cli_imports_from_source_tree(self):

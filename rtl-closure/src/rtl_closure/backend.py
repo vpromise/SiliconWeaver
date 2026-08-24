@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
-from openai import APIConnectionError, APITimeoutError, DefaultHttpxClient, OpenAI
+from openai import APIConnectionError, APITimeoutError, DefaultHttpx2Client, OpenAI
 
 from .errors import ModelInfrastructureError
 
@@ -193,7 +193,7 @@ class ReasoningBackend(Backend):
             base_url=base_url,
             timeout=timeout_seconds,
             max_retries=0,
-            http_client=DefaultHttpxClient(trust_env=False),
+            http_client=DefaultHttpx2Client(trust_env=False),
         )
 
     def _emit(self, event: dict[str, Any]) -> None:

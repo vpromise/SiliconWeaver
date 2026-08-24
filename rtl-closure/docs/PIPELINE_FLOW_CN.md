@@ -112,6 +112,11 @@ RTL-Closure 独立读取 `RTL_CLOSURE_PROVIDER`、`RTL_CLOSURE_MODEL`、
 launcher 只向 orchestrator subprocess 注入缺失值；显式环境值优先。规格中不允许写 API
 key、token 或其他凭据，凭据也不会进入 run state、事件、日志或容器。
 
+0.7 运行时要求 OpenAI Python `>=3.3.1,<4`，并显式使用其 HTTPX2 client。
+传输层设置 `trust_env=False`，因此不会从 shell 环境继承代理或证书变量；模型端点所需
+CA 必须进入操作系统 trust store。这样部署传输策略不会混入规格，也不会被环境中的
+代理设置静默改变。
+
 `generation.model` 是可选的运行钉住项：规格中存在时优先于
 `RTL_CLOSURE_MODEL`；不存在时使用环境变量。schema 不再偷偷填充模型默认值；两处都缺失会
 得到 typed、不可重试的模型配置错误。

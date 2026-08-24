@@ -317,6 +317,13 @@ orchestrator subprocess environment; explicit variables take precedence.
 Credentials are never copied to specs, run state, logs, generated designs, or
 containers.
 
+The runtime requires OpenAI Python 3.3.1 or newer within the 3.x release line
+and explicitly uses its HTTPX2 client. Ambient proxy and certificate environment
+variables are ignored (`trust_env=False`); the model endpoint's CA must therefore
+be available through the operating-system trust store. This keeps deployment
+transport policy outside specifications and prevents ambient shell proxy state
+from silently changing credential-bearing requests.
+
 `generation.model` is optional. When it is present, it deliberately pins the
 run to that model and overrides `RTL_CLOSURE_MODEL`; when it is absent, the
 backend uses `RTL_CLOSURE_MODEL`. There is no schema-level model default, so a

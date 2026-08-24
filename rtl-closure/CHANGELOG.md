@@ -13,6 +13,8 @@
   identity attestations;
 - update Ruff to 0.16.4 while explicitly preserving the established
   correctness-focused lint selection;
+- migrate the model transport to OpenAI Python 3.3.1 and its explicit HTTPX2
+  client while retaining credential-safe, environment-independent requests;
 - classify physical-planning failures as non-RTL-repairable.
 
 ## 0.6.1 - Initial public snapshot
