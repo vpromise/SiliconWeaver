@@ -1,8 +1,8 @@
 # RTL-Closure / Pi-Lane 自然语言 RTL 到 GDS 全流程说明
 
-> 适用实现：`rtl-closure 0.6.1`、`pi-lane 0.5.1` / `lane-agent`、
+> 适用实现：`rtl-closure 0.7.0`、`pi-lane 0.6.0` / `lane-agent`、
 > 运行镜像 `ghcr.io/librelane/librelane:3.0.5`。本文依据本仓库源码、配套
-> Pi-Lane 0.5.1 公共接口以及固定 LibreLane 3.0.5 镜像的实现整理，不是概念性规划。
+> Pi-Lane 0.6.0 公共接口以及固定 LibreLane 3.0.5 镜像的实现整理，不是概念性规划。
 
 ## 1. 文档目标与结论口径
 
@@ -102,11 +102,11 @@ Pi monitor 默认每 10 秒串行读取这些来源。状态指纹变化立即�
 |---|---|---|
 | `intent_closure` | mode、用户确认、未决问题、assumptions、确认哈希 | 防止用户确认后意图表面被静默改写 |
 | `design` | `name`、完整行为描述、`pdk`、端口、clock、reset、可选 `architecture` | 生成模块接口、行为契约、结构门禁和 SDC |
-| `flow` | `name=Classic`、可选 `to`、mapped equivalence、floorplan sizing、利用率、密度、可选 die/core area、jobs | 渲染 LibreLane `config.yaml` |
+| `flow` | `name=Classic`、可选 `to`、mapped equivalence、可选物理规划、floorplan sizing、利用率、密度、可选 die/core area、jobs | 渲染 LibreLane `config.yaml` 并选择是否先运行 planner |
 | `generation` | profile、可选 model、候选数、轮数、随机测试数、seed、thinking | 选择生成后端和预算 |
 | `verification` | 原子需求、定向场景、修复/覆盖预算、bounded formal 和 universal property 配置 | 建立不可变验证闭包和发布门禁 |
 
-示例规格显式选择 `gpt-5.6-sol`；`reasoning_effort` 缺省为 `xhigh`，0.6 只使用隔离的 API profile。
+示例规格显式选择 `gpt-5.6-sol`；`reasoning_effort` 缺省为 `xhigh`，0.7 只使用隔离的 API profile。
 RTL-Closure 独立读取 `RTL_CLOSURE_PROVIDER`、`RTL_CLOSURE_MODEL`、
 `RTL_CLOSURE_BASE_URL` 和 `RTL_CLOSURE_API_KEY`，不读取 Pi 状态。通过 Pi-Lane 启动时，
 launcher 只向 orchestrator subprocess 注入缺失值；显式环境值优先。规格中不允许写 API
@@ -153,6 +153,12 @@ RTL_CLOSURE_MODEL_CONCURRENCY=2        # 同时候选数，范围 1..8
 `flow.floorplan_sizing` 只接受 `relative` 或 `absolute`，默认是 `relative`。只有显式
 `absolute` 才允许并要求同时给出 `die_area` 和 `core_area`；`relative` 禁止携带这两个
 面积字段。不要给小设计无条件套用固定 300 x 300 的 die。
+
+`flow.physical_planning_mode` 默认是 `off`。`auto_safe` 会在最终 Lane 运行前启动
+Pi-Lane 0.6 的证据绑定 planner；`reference_locked` 还要求一个绝对、普通文件形式且
+SHA-256 内容绑定的 geometry lock。可选 policy 同样按绝对路径和内容哈希绑定。规划失败
+属于物理/基础设施失败，不得触发新一轮 RTL 修复；随包 bootstrap policy 的
+`publishable` 为 `false`，不能据此声称已经标定 QoR 或完成 signoff。
 
 形式验证有两套独立配置，不能混为一个“formal”：
 

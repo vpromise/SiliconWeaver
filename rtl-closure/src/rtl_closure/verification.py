@@ -18,6 +18,7 @@ from typing import Any
 from .adaptive import behavioral_coverage, suite_hash
 from .contract import content_hash
 from .errors import ContainerInfrastructureError
+from .logic_value import matches as logic_values_match, validate as validate_logic_value
 from .sandbox import ORACLE_NAMESPACE_SETUP, _docker_base
 from .spec import DesignSpec
 from .runtime import (
@@ -90,7 +91,9 @@ def validate_independent_transcript(
     expected_inputs: dict[str, int],
     expected_outputs: dict[str, int],
 ) -> str | None:
-    """Validate a complete, concrete differential-verification transcript."""
+    """Validate a complete v2 four-state differential-verification transcript."""
+    if result.get("transcript_schema_version") != 2:
+        return "verifier transcript is not schema version 2"
     expected_num_tests = len(expected_stimuli)
     if result.get("num_tests") != expected_num_tests:
         return "verifier num_tests does not match the frozen request"
@@ -112,14 +115,9 @@ def validate_independent_transcript(
             if not isinstance(row, dict) or set(row) != output_names:
                 return f"verifier {name} row {index} has invalid output keys"
             for signal, value in row.items():
-                if isinstance(value, bool) or not isinstance(value, int):
-                    return (
-                        f"verifier {name} row {index}.{signal} is not a concrete integer"
-                    )
-                if value < 0 or value >= (1 << expected_outputs[signal]):
-                    return (
-                        f"verifier {name} row {index}.{signal} is outside its output range"
-                    )
+                error = validate_logic_value(value, expected_outputs[signal])
+                if error is not None:
+                    return f"verifier {name} row {index}.{signal} is invalid: {error}"
     mismatches = result.get("mismatches")
     mismatched = result.get("mismatched")
     total_checks = result.get("total_checks")
@@ -139,6 +137,18 @@ def validate_independent_transcript(
         or total_checks != expected_total_checks
     ):
         return "verifier total_checks does not cover every output sample"
+
+    compared_bits = result.get("compared_bits")
+    masked_bits = result.get("masked_bits")
+    expected_compared_bits = sum(expected_outputs.values()) * expected_num_tests
+    if (
+        isinstance(compared_bits, bool)
+        or not isinstance(compared_bits, int)
+        or compared_bits != expected_compared_bits
+        or isinstance(masked_bits, bool)
+        or masked_bits != 0
+    ):
+        return "verifier bit coverage does not bind the frozen output contract"
 
     verilog_trace = result["verilog_trace"]
     python_trace = result["python_trace"]
@@ -177,8 +187,7 @@ def validate_independent_transcript(
         zip(verilog_trace, python_trace)
     ):
         for signal, width in expected_outputs.items():
-            mask = (1 << width) - 1
-            if (verilog_row[signal] & mask) != (python_row[signal] & mask):
+            if not logic_values_match(verilog_row[signal], python_row[signal]):
                 derived_mismatch_keys.add((test_index, signal))
     if mismatch_keys != derived_mismatch_keys:
         return "verifier mismatch rows omit or invent trace differences"

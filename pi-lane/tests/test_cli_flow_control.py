@@ -87,9 +87,15 @@ class DoctorAndFlowControlTests(unittest.TestCase):
                 "request-3",
                 "--origin",
                 "rtl-closure",
+                "--physical-plan",
+                "/tmp/physical-plan.json",
             ]
         )
         reconcile = parser.parse_args(["reconcile", "--run-id", "old", "--json"])
+        plan_start = parser.parse_args(
+            ["plan-start", "--config", "/tmp/config.yaml", "--geometry-lock", "/tmp/human-lock.json", "--idempotency-key", "plan-key", "--json"]
+        )
+        plan_status = parser.parse_args(["plan-status", "--plan-id", "plan-1", "--json"])
         listing = parser.parse_args(["list", "--active", "--limit", "1", "--json"])
         self.assertEqual(doctor.pdk, "sky130A")
         self.assertEqual(resume.run_id, "old")
@@ -100,6 +106,10 @@ class DoctorAndFlowControlTests(unittest.TestCase):
         self.assertEqual(start.attempt_id, "attempt-2")
         self.assertEqual(start.idempotency_key, "request-3")
         self.assertEqual(start.origin, "rtl-closure")
+        self.assertEqual(start.physical_plan, Path("/tmp/physical-plan.json"))
+        self.assertEqual(plan_start.geometry_lock, Path("/tmp/human-lock.json"))
+        self.assertEqual(plan_start.idempotency_key, "plan-key")
+        self.assertEqual(plan_status.plan_id, "plan-1")
         self.assertEqual(reconcile.run_id, "old")
         self.assertTrue(reconcile.json)
         self.assertTrue(listing.active)
@@ -142,7 +152,7 @@ class DoctorAndFlowControlTests(unittest.TestCase):
             command, _ = build_docker_command(
                 config,
                 run_id="new",
-                tag="tag",
+                tag="PI_LANE_new",
                 pdk_root=root / "pdk",
                 overrides=[],
                 frm="Checker.YosysUnmappedCells",

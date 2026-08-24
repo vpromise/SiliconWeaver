@@ -98,6 +98,8 @@ TERMINAL_OUTCOME_KEYS = (
     "initial_state_sha256",
     "initial_state_snapshot",
     "resume",
+    "planning_probe",
+    "physical_plan",
     "artifacts",
     "canonical_gds",
     "runtime_identity_attested",

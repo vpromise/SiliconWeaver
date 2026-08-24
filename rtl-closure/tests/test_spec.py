@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -137,6 +138,7 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(config["FP_SIZING"], "relative")
         self.assertEqual(config["IO_PIN_ORDER_CFG"], "dir::pin_order.cfg")
         self.assertEqual(spec.flow["mapped_equivalence_mode"], "off")
+        self.assertEqual(spec.flow["physical_planning_mode"], "off")
         self.assertFalse(config["RUN_EQY"])
         self.assertNotIn("DIE_AREA", config)
         self.assertNotIn("CORE_AREA", config)
@@ -212,6 +214,26 @@ class SpecTests(unittest.TestCase):
         with self.assertRaisesRegex(SpecError, "requires both"):
             validate_spec(raw)
 
+    def test_physical_planning_modes_are_fail_closed(self):
+        raw = json.loads(EXAMPLE.read_text())
+        raw["flow"]["physical_planning_mode"] = "invalid"
+        with self.assertRaisesRegex(SpecError, "physical_planning_mode"):
+            validate_spec(raw)
+
+        raw = json.loads(EXAMPLE.read_text())
+        raw["flow"]["physical_planning_mode"] = "reference_locked"
+        with self.assertRaisesRegex(SpecError, "reference_geometry_lock"):
+            validate_spec(raw)
+
+        with tempfile.TemporaryDirectory() as temp:
+            plan = Path(temp) / "geometry-lock.json"
+            plan.write_text("{}\n", encoding="utf-8")
+            raw["flow"]["reference_geometry_lock"] = str(plan)
+            spec = validate_spec(raw)
+            self.assertEqual(
+                spec.flow["reference_geometry_lock"], str(plan.resolve())
+            )
+
         raw["flow"] = {
             "floorplan_sizing": "relative",
             "die_area": [0, 0, 100, 100],
@@ -220,13 +242,30 @@ class SpecTests(unittest.TestCase):
         with self.assertRaisesRegex(SpecError, "only valid with absolute"):
             validate_spec(raw)
 
-    def test_pin_order_is_stable_and_keeps_buses_grouped(self):
+    def test_physical_planning_policy_is_content_bound(self):
+        raw = json.loads(EXAMPLE.read_text())
+        raw["flow"]["physical_planning_mode"] = "auto_safe"
+        with tempfile.TemporaryDirectory() as temp:
+            policy = Path(temp) / "policy.json"
+            policy.write_text("{}\n", encoding="utf-8")
+            raw["flow"]["physical_planning_policy"] = str(policy)
+            spec = validate_spec(raw)
+            self.assertEqual(
+                spec.flow["physical_planning_policy"], str(policy.resolve())
+            )
+            self.assertEqual(len(spec.flow["physical_planning_policy_sha256"]), 64)
+            raw["flow"]["physical_planning_policy_sha256"] = "0" * 64
+            with self.assertRaisesRegex(SpecError, "does not match"):
+                validate_spec(raw)
+
+    def test_pin_order_is_stable_and_splits_wide_buses_contiguously(self):
         spec = load_spec(EXAMPLE)
         self.assertEqual(
             render_pin_order(spec),
             "@bus_major\n\n"
+            "#N\ncount\\[4\\]\ncount\\[5\\]\ncount\\[6\\]\ncount\\[7\\]\n\n"
             "#S\nclk\nrst_n\n\n"
-            "#E\ncount\\[\\d+\\]\n\n"
+            "#E\ncount\\[0\\]\ncount\\[1\\]\ncount\\[2\\]\ncount\\[3\\]\n\n"
             "#W\nenable\n",
         )
 

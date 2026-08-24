@@ -17,7 +17,6 @@ import stat
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -177,14 +176,6 @@ def rtl_closure_runtime_config_fingerprint(
             }
         )
     )
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_spec_bytes(path: Path) -> tuple[Path, bytes]:
@@ -464,16 +455,6 @@ def _connect(path: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA busy_timeout=30000")
     return connection
-
-
-@dataclass(frozen=True)
-class WorkflowIdentity:
-    workflow_id: str
-    idempotency_key: str
-    spec_path: str
-    spec_sha256: str
-    design_name: str
-    pdk: str
 
 
 class OrchestratorStore:

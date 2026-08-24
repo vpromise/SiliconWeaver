@@ -13,8 +13,10 @@ import tempfile
 import textwrap
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .errors import ContainerInfrastructureError
+from .logic_value import from_binary, from_integer, matches
 from .runtime import SANDBOX_IMAGE as SANDBOX_IMAGE, sandbox_image_ref
 FORBIDDEN_RTL = (
     (re.compile(r"`\s*include\b", re.IGNORECASE), "preprocessor include"),
@@ -523,7 +525,7 @@ def _build_contract_testbench(
     inputs: list[tuple[str, int]],
     outputs: list[tuple[str, int]],
     stimuli: list[dict[str, int]],
-    clock_port: str,
+    clock_port: str | None,
     resets: list[tuple[str, int, bool]],
 ) -> str:
     lines = ["`timescale 1ns/1ps", "module stim_tb();"]
@@ -553,7 +555,7 @@ def _build_contract_testbench(
         assignments = " ".join(f"{name} = 'h{value:x};" for name, value in stimulus.items())
         lines.append(f"    {assignments}")
         lines.append(f"    @(posedge {clock_port}); #1;")
-        formats = " ".join(f"{name}=%0d" for name, _ in outputs)
+        formats = " ".join(f"{name}=%b" for name, _ in outputs)
         arguments = ", ".join(name for name, _ in outputs)
         lines.append(f'    $display("TEST_{index} {formats}", {arguments});')
     lines.extend(
@@ -564,6 +566,33 @@ def _build_contract_testbench(
             "endmodule",
         ]
     )
+    return "\n".join(lines)
+
+
+def _build_combinational_testbench(
+    inputs: list[tuple[str, int]],
+    outputs: list[tuple[str, int]],
+    stimuli: list[dict[str, int]],
+) -> str:
+    """Build a no-clock differential harness for stateless RTL."""
+    lines = ["`timescale 1ns/1ps", "module stim_tb();"]
+    for name, width in inputs:
+        bits = f"[{width - 1}:0] " if width > 1 else ""
+        lines.append(f"  reg {bits}{name};")
+    for name, width in outputs:
+        bits = f"[{width - 1}:0] " if width > 1 else ""
+        lines.append(f"  wire {bits}{name};")
+    connections = ", ".join(f".{name}({name})" for name, _ in inputs + outputs)
+    lines.append(f"  TopModule dut ({connections});")
+    lines.append("  initial begin")
+    for index, stimulus in enumerate(stimuli):
+        for name, value in stimulus.items():
+            lines.append(f"    {name} = 'h{value:x};")
+        lines.append("    #1;")
+        formats = " ".join(f"{name}=%b" for name, _ in outputs)
+        arguments = ", ".join(name for name, _ in outputs)
+        lines.append(f'    $display("TEST_{index} {formats}", {arguments});')
+    lines.extend(["    $finish;", "  end", "endmodule"])
     return "\n".join(lines)
 
 
@@ -674,7 +703,8 @@ def simulate_verilog(
             return None, f"sv_sim_fail: {executed.stderr.strip()[:1500]}"
         if "TIMEOUT" in executed.stdout:
             return None, "sv_sim_hang"
-        results: list[dict[str, int]] = [{} for _ in stimuli]
+        widths = dict(outputs)
+        results: list[dict[str, str]] = [{} for _ in stimuli]
         for line in executed.stdout.splitlines():
             match = re.match(r"TEST_(\d+)\s+(.*)", line.strip())
             if not match:
@@ -682,8 +712,17 @@ def simulate_verilog(
             index = int(match.group(1))
             if index >= len(results):
                 continue
-            for pair in re.finditer(r"(\w+)=(-?\d+)", match.group(2)):
-                results[index][pair.group(1)] = int(pair.group(2))
+            for pair in re.finditer(r"(\w+)=([01xXzZ]+)", match.group(2)):
+                results[index][pair.group(1)] = pair.group(2)
+        for index, row in enumerate(results):
+            if set(row) != set(widths):
+                return None, f"sv_result_missing_output: sample {index}"
+            try:
+                results[index] = {
+                    name: from_binary(row[name], widths[name]) for name in sorted(widths)
+                }
+            except ValueError as error:
+                return None, f"sv_result_parse_fail: sample {index}: {error}"
         return results, None
 
 
@@ -804,7 +843,8 @@ def contract_cross_verify(
             "has_clk": False,
             "meta_error": "no output ports parsed",
         }
-    if input_map.get(clock_port) != 1:
+    has_clk = clock_port is not None
+    if has_clk and input_map.get(clock_port) != 1:
         return {
             "match_rate": 0.0,
             "mismatches": [],
@@ -817,7 +857,7 @@ def contract_cross_verify(
     resets: list[tuple[str, int, bool]] = []
     if reset:
         resets.append((reset["port"], input_map[reset["port"]], reset["active_low"]))
-    excluded = {clock_port, *(name for name, _, _ in resets)}
+    excluded = {name for name in [clock_port, *(name for name, _, _ in resets)] if name}
     rng = random.Random(seed)
     stimuli = [
         {
@@ -840,9 +880,9 @@ def contract_cross_verify(
         inputs,
         outputs,
         stimuli,
-        True,
+        has_clk,
         resets,
-        clock_port=clock_port,
+        clock_port=clock_port or "clk",
     )
     if sv_error:
         return {
@@ -851,11 +891,11 @@ def contract_cross_verify(
             "sv_error": sv_error,
             "py_error": None,
             "num_tests": num_tests,
-            "has_clk": True,
+            "has_clk": has_clk,
             "stimuli": stimuli,
         }
     py_out, py_error = simulate_python(
-        dut_py, inputs, outputs, stimuli, True, resets
+        dut_py, inputs, outputs, stimuli, has_clk, resets
     )
     if py_error:
         return {
@@ -864,36 +904,69 @@ def contract_cross_verify(
             "sv_error": None,
             "py_error": py_error,
             "num_tests": num_tests,
-            "has_clk": True,
+            "has_clk": has_clk,
             "stimuli": stimuli,
             "verilog_trace": sv_out,
         }
     mismatches = []
     total = 0
     mismatched = 0
+    compared_bits = 0
+    masked_bits = 0
     widths = dict(outputs)
+    verilog_trace: list[dict[str, dict[str, int]]] = []
+    python_trace: list[dict[str, dict[str, int]]] = []
     for index, (sv_row, py_row) in enumerate(zip(sv_out, py_out)):
+        verilog_sample: dict[str, dict[str, int]] = {}
+        python_sample: dict[str, dict[str, int]] = {}
         for name, width in outputs:
             total += 1
-            mask = (1 << width) - 1
             sv_value = sv_row.get(name)
             py_value = py_row.get(name)
-            sv_bits = None if sv_value is None else int(sv_value) & mask
-            py_bits = None if py_value is None else int(py_value) & mask
-            if sv_bits != py_bits:
+            try:
+                sv_logic = (
+                    sv_value
+                    if isinstance(sv_value, dict)
+                    else from_integer(sv_value, width)
+                )
+                py_logic = (
+                    py_value
+                    if isinstance(py_value, dict)
+                    else from_integer(py_value, width)
+                )
+            except ValueError as error:
+                return {
+                    "transcript_schema_version": 2,
+                    "match_rate": 0.0,
+                    "mismatches": [],
+                    "sv_error": None,
+                    "py_error": None,
+                    "num_tests": num_tests,
+                    "has_clk": has_clk,
+                    "stimuli": stimuli,
+                    "meta_error": f"logic_value_encoding_error: {error}",
+                }
+            verilog_sample[name] = sv_logic
+            python_sample[name] = py_logic
+            compared_bits += int(sv_logic["compare_mask"]).bit_count()
+            masked_bits += width - int(sv_logic["compare_mask"]).bit_count()
+            if not matches(sv_logic, py_logic):
                 mismatched += 1
                 mismatches.append(
                     {
                         "test": index,
                         "signal": name,
                         "width": widths[name],
-                        "verilog": sv_value,
-                        "python": py_value,
+                        "verilog": sv_logic,
+                        "python": py_logic,
                         "inputs": stimuli[index],
                     }
                 )
+        verilog_trace.append(verilog_sample)
+        python_trace.append(python_sample)
     rate = 1.0 - (mismatched / total) if total else 0.0
     return {
+        "transcript_schema_version": 2,
         "match_rate": rate,
         "mismatches": mismatches,
         "sv_error": None,
@@ -901,10 +974,12 @@ def contract_cross_verify(
         "num_tests": num_tests,
         "total_checks": total,
         "mismatched": mismatched,
-        "has_clk": True,
+        "compared_bits": compared_bits,
+        "masked_bits": masked_bits,
+        "has_clk": has_clk,
         "stimuli": stimuli,
-        "verilog_trace": sv_out,
-        "python_trace": py_out,
+        "verilog_trace": verilog_trace,
+        "python_trace": python_trace,
     }
 
 
@@ -1101,12 +1176,87 @@ def _observable_equivalence_metadata(
     return supporting_internal_names, output_bits, output_ports
 
 
+def _equivalence_port_evidence(netlist: dict, name: str) -> dict:
+    """Extract a fail-closed port/dependency view from Yosys JSON evidence."""
+
+    module = _equivalence_module(netlist, name)
+    ports = module.get("ports")
+    if not isinstance(ports, dict):
+        raise RuntimeError("Yosys equivalence preparation produced invalid ports")
+    inputs: dict[str, list[int | str]] = {}
+    outputs: dict[str, list[int | str]] = {}
+    for port_name, port in sorted(ports.items()):
+        if not isinstance(port_name, str) or not isinstance(port, dict):
+            raise RuntimeError("Yosys equivalence preparation produced invalid port metadata")
+        direction = port.get("direction")
+        bits = port.get("bits")
+        if direction not in {"input", "output"} or not isinstance(bits, list) or not bits:
+            raise RuntimeError("Yosys equivalence preparation produced unsupported ports")
+        if any(isinstance(bit, (dict, list, bool)) for bit in bits):
+            raise RuntimeError("Yosys equivalence preparation produced invalid port bits")
+        target = inputs if direction == "input" else outputs
+        target[port_name] = list(bits)
+    if not outputs:
+        raise RuntimeError("synthesis equivalence requires at least one output port")
+
+    reverse_dependencies: dict[int | str, set[int | str]] = {}
+    cells = module.get("cells")
+    if not isinstance(cells, dict):
+        raise RuntimeError("Yosys equivalence preparation produced invalid cells")
+    for cell in cells.values():
+        if not isinstance(cell, dict):
+            raise RuntimeError("Yosys equivalence preparation produced invalid cell metadata")
+        directions = cell.get("port_directions")
+        connections = cell.get("connections")
+        if not isinstance(directions, dict) or not isinstance(connections, dict):
+            raise RuntimeError("Yosys equivalence preparation lacks cell port directions")
+        inputs_to_cell: set[int | str] = set()
+        outputs_from_cell: set[int | str] = set()
+        for port_name, direction in directions.items():
+            bits = connections.get(port_name)
+            if not isinstance(port_name, str) or not isinstance(bits, list):
+                raise RuntimeError("Yosys equivalence preparation has malformed connections")
+            valid_bits = {
+                bit for bit in bits if not isinstance(bit, (dict, list, bool))
+            }
+            if direction in {"input", "inout"}:
+                inputs_to_cell.update(valid_bits)
+            if direction in {"output", "inout"}:
+                outputs_from_cell.update(valid_bits)
+        for output_bit in outputs_from_cell:
+            reverse_dependencies.setdefault(output_bit, set()).update(inputs_to_cell)
+
+    output_bits = {bit for bits in outputs.values() for bit in bits}
+
+    def reaches_input(input_bits: list[int | str]) -> bool:
+        frontier = list(output_bits)
+        visited: set[int | str] = set()
+        sources = set(input_bits)
+        while frontier:
+            bit = frontier.pop()
+            if bit in visited:
+                continue
+            visited.add(bit)
+            if bit in sources:
+                return True
+            frontier.extend(reverse_dependencies.get(bit, ()))
+        return False
+
+    return {
+        "inputs": {port: len(bits) for port, bits in inputs.items()},
+        "outputs": {port: len(bits) for port, bits in outputs.items()},
+        "observable_input_dependency": {
+            port: reaches_input(bits) for port, bits in inputs.items()
+        },
+    }
+
+
 def _prepare_observable_equivalence(
     work: Path,
     *,
     top: str,
     timeout: int,
-) -> tuple[list[str], int, list[str], str]:
+) -> tuple[list[str], int, list[str], str, dict]:
     script = " ".join(
         (
             "read_verilog -sv /work/design.sv;",
@@ -1144,7 +1294,157 @@ def _prepare_observable_equivalence(
     supporting_names, output_bits, output_ports = _observable_equivalence_metadata(
         gold, gate
     )
-    return supporting_names, output_bits, output_ports, output
+    canonical_gold = json.dumps(gold, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    canonical_gate = json.dumps(gate, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    evidence = {
+        "schema_version": 1,
+        "top": top,
+        "preparation_script": script,
+        "preparation_script_sha256": hashlib.sha256(script.encode()).hexdigest(),
+        "preparation_log": output,
+        "preparation_log_sha256": hashlib.sha256(output.encode()).hexdigest(),
+        "gold_netlist_sha256": hashlib.sha256(canonical_gold.encode()).hexdigest(),
+        "gate_netlist_sha256": hashlib.sha256(canonical_gate.encode()).hexdigest(),
+        "interfaces": {
+            "gold": _equivalence_port_evidence(gold, "gold"),
+            "gate": _equivalence_port_evidence(gate, "gate"),
+        },
+    }
+    return supporting_names, output_bits, output_ports, output, evidence
+
+
+def _equivalence_inconclusive(
+    rtl: str,
+    *,
+    top: str,
+    clock_port: str | None,
+    reset: dict | None,
+    output_ports: list[str],
+    observable_output_bits: int,
+    supporting_names: list[str],
+    reason_code: str,
+    preparation: dict | None,
+    reset_evidence: dict | None = None,
+) -> dict:
+    return {
+        "schema_version": 4,
+        "status": "inconclusive",
+        "verdict": "inconclusive",
+        "reason_code": reason_code,
+        "provider": "yosys_generic_synthesis_equivalence",
+        "scope": "observable_outputs_rtl_vs_generic_synthesized_netlist",
+        "top": top,
+        "clock_port": clock_port,
+        "reset": reset,
+        "reset_base_case": {
+            "status": "inconclusive",
+            "asserted_samples": 0,
+            "post_reset_samples": 0,
+            "sampling": "rising_clock_edge",
+        },
+        "sequential_induction_depth": 8,
+        "comparison_semantics": {
+            "points": "top_level_output_bits_only",
+            "observable_output_bits": observable_output_bits,
+            "output_ports": output_ports,
+            "supporting_internal_match_names": len(supporting_names),
+            "internal_state": "supporting_inductive_relation_not_a_release_obligation",
+            "reachable_state_base_proven": False,
+        },
+        "equivalence_cells": None,
+        "proven_cells": None,
+        "rtl_sha256": hashlib.sha256(rtl.encode("utf-8")).hexdigest(),
+        "sandbox_image": sandbox_image_ref(),
+        "preparation": preparation,
+        "reset_observability": reset_evidence,
+        "proof_evidence": None,
+    }
+
+
+def _read_equivalence_counterexample(path: Path) -> tuple[dict[str, Any], str]:
+    """Load one bounded Yosys SAT dump without trusting a partial artifact."""
+
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(
+            f"Yosys equivalence counterexample artifact is unavailable: {exc}"
+        ) from exc
+    if not raw or len(raw) > 1024 * 1024:
+        raise RuntimeError("Yosys equivalence counterexample exceeds its evidence bound")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Yosys equivalence counterexample artifact is invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(value, dict) or not value:
+        raise RuntimeError("Yosys equivalence counterexample is not a non-empty object")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def _equivalence_counterexample(
+    rtl: str,
+    *,
+    top: str,
+    clock_port: str | None,
+    reset: dict | None,
+    output_ports: list[str],
+    observable_output_bits: int,
+    supporting_names: list[str],
+    preparation: dict | None,
+    reset_evidence: dict | None,
+    induction_script: str,
+    induction_log: str,
+    replay_script: str,
+    replay_log: str,
+    sat_dump: dict[str, Any],
+    sat_dump_sha256: str,
+) -> dict:
+    """Return only a replayable, observable miter counterexample verdict."""
+
+    report = _equivalence_inconclusive(
+        rtl,
+        top=top,
+        clock_port=clock_port,
+        reset=reset,
+        output_ports=output_ports,
+        observable_output_bits=observable_output_bits,
+        supporting_names=supporting_names,
+        reason_code="observable_miter_counterexample",
+        preparation=preparation,
+        reset_evidence=reset_evidence,
+    )
+    report.update(
+        status="counterexample",
+        verdict="counterexample",
+        scope=(
+            "post_reset_observable_outputs_rtl_vs_generic_synthesized_netlist"
+            if reset is not None
+            else "observable_outputs_rtl_vs_generic_synthesized_netlist"
+        ),
+        proof_evidence={
+            "induction_script": induction_script,
+            "induction_script_sha256": hashlib.sha256(
+                induction_script.encode()
+            ).hexdigest(),
+            "induction_log": induction_log,
+            "induction_log_sha256": hashlib.sha256(induction_log.encode()).hexdigest(),
+            "replay_script": replay_script,
+            "replay_script_sha256": hashlib.sha256(replay_script.encode()).hexdigest(),
+            "replay_log": replay_log,
+            "replay_log_sha256": hashlib.sha256(replay_log.encode()).hexdigest(),
+            "reset_schedule_bound_to_miter": reset is not None,
+        },
+        counterexample={
+            "format": "yosys-sat-dump-json-v1",
+            "scope": "observable_equiv_miter",
+            "replay_status": "miter_observable_mismatch",
+            "artifact_sha256": sat_dump_sha256,
+            "artifact": sat_dump,
+        },
+    )
+    return report
 
 
 def run_synthesis_equivalence(
@@ -1208,75 +1508,158 @@ def run_synthesis_equivalence(
 
     base_steps = sequential_depth + 2
     reset_base_script: tuple[str, ...] = ()
-    if normalized_reset is not None:
-        asserted = 0 if normalized_reset["active_low"] else 1
-        deasserted = 1 - asserted
-        reset_port = normalized_reset["port"]
-        reset_schedule = " ".join(
-            f"-set-at {step} {reset_port} "
-            f"{asserted if step <= 2 else deasserted}"
-            for step in range(1, base_steps + 1)
-        )
-        reset_base_script = (
-            "design -save equiv_induction_design;",
-            "equiv_miter -assert equiv_reset_base @observable_equiv;",
-            "prep -top equiv_reset_base;",
-            (
-                f"sat -verify -seq {base_steps} -set-init-def -set-def-inputs "
-                f"{reset_schedule} -prove-skip 2 -prove-asserts;"
-            ),
-            "design -load equiv_induction_design;",
-            "hierarchy -check -top equiv;",
-            (
-                "select -set observable_equiv equiv/o:* %ci1 "
-                "equiv/t:$equiv %i;"
-            ),
-        )
+    reset_schedule = ""
 
     with tempfile.TemporaryDirectory(prefix="rtl-closure-equiv-") as temp:
         work = Path(temp)
         (work / "design.sv").write_text(rtl, encoding="utf-8")
-        supporting_names, observable_output_bits, output_ports, preparation_log = (
-            _prepare_observable_equivalence(work, top=top, timeout=timeout)
-        )
-        script = " ".join(
+        prepared = _prepare_observable_equivalence(work, top=top, timeout=timeout)
+        if len(prepared) == 4:
+            supporting_names, observable_output_bits, output_ports, preparation_log = prepared
+            preparation_evidence = None
+        else:
             (
-                "read_verilog -sv /work/design.sv;",
-                f"hierarchy -check -top {top};",
-                "proc; memory; flatten; async2sync; opt_clean;",
-                f"rename {top} gold;",
-                "design -stash gold_design;",
-                "design -reset;",
-                "read_verilog -sv /work/design.sv;",
+                supporting_names,
+                observable_output_bits,
+                output_ports,
+                preparation_log,
+                preparation_evidence,
+            ) = prepared
+
+        reset_evidence: dict[str, Any] | None = None
+        if normalized_reset is not None:
+            if not isinstance(preparation_evidence, dict):
+                return _equivalence_inconclusive(
+                    rtl,
+                    top=top,
+                    clock_port=clock_port,
+                    reset=normalized_reset,
+                    output_ports=output_ports,
+                    observable_output_bits=observable_output_bits,
+                    supporting_names=supporting_names,
+                    reason_code="reset_preparation_evidence_missing",
+                    preparation=preparation_evidence,
+                ), preparation_log
+            interfaces = preparation_evidence.get("interfaces")
+            gold = interfaces.get("gold") if isinstance(interfaces, dict) else None
+            gate = interfaces.get("gate") if isinstance(interfaces, dict) else None
+            if not isinstance(gold, dict) or not isinstance(gate, dict):
+                return _equivalence_inconclusive(
+                    rtl,
+                    top=top,
+                    clock_port=clock_port,
+                    reset=normalized_reset,
+                    output_ports=output_ports,
+                    observable_output_bits=observable_output_bits,
+                    supporting_names=supporting_names,
+                    reason_code="reset_interface_evidence_invalid",
+                    preparation=preparation_evidence,
+                ), preparation_log
+            gold_inputs = gold.get("inputs")
+            gate_inputs = gate.get("inputs")
+            gold_dependencies = gold.get("observable_input_dependency")
+            gate_dependencies = gate.get("observable_input_dependency")
+            reset_port = normalized_reset["port"]
+            clock_name = clock_port
+            if (
+                not isinstance(gold_inputs, dict)
+                or not isinstance(gate_inputs, dict)
+                or not isinstance(gold_dependencies, dict)
+                or not isinstance(gate_dependencies, dict)
+                or reset_port not in gold_inputs
+                or reset_port not in gate_inputs
+                or (clock_name is not None and (clock_name not in gold_inputs or clock_name not in gate_inputs))
+            ):
+                return _equivalence_inconclusive(
+                    rtl,
+                    top=top,
+                    clock_port=clock_port,
+                    reset=normalized_reset,
+                    output_ports=output_ports,
+                    observable_output_bits=observable_output_bits,
+                    supporting_names=supporting_names,
+                    reason_code="reset_or_clock_port_missing_from_miter",
+                    preparation=preparation_evidence,
+                ), preparation_log
+            reset_evidence = {
+                "port": reset_port,
+                "gold_present": True,
+                "gate_present": True,
+                "gold_observable_dependency": gold_dependencies.get(reset_port),
+                "gate_observable_dependency": gate_dependencies.get(reset_port),
+            }
+            if reset_evidence["gold_observable_dependency"] is not True or reset_evidence["gate_observable_dependency"] is not True:
+                return _equivalence_inconclusive(
+                    rtl,
+                    top=top,
+                    clock_port=clock_port,
+                    reset=normalized_reset,
+                    output_ports=output_ports,
+                    observable_output_bits=observable_output_bits,
+                    supporting_names=supporting_names,
+                    reason_code="reset_observable_dependency_unproven",
+                    preparation=preparation_evidence,
+                    reset_evidence=reset_evidence,
+                ), preparation_log
+            asserted = 0 if normalized_reset["active_low"] else 1
+            deasserted = 1 - asserted
+            reset_schedule = " ".join(
+                f"-set-at {step} {reset_port} "
+                f"{asserted if step <= 2 else deasserted}"
+                for step in range(1, base_steps + 1)
+            )
+            reset_base_script = (
+                "design -save equiv_induction_design;",
+                "equiv_miter -assert equiv_reset_base @observable_equiv;",
+                "prep -top equiv_reset_base;",
                 (
-                    "synth -flatten -encfile /tmp/rtl-closure-fsm.enc "
-                    f"-top {top}; async2sync; opt_clean;"
+                    f"sat -verify -seq {base_steps} -set-init-def -set-def-inputs "
+                    f"{reset_schedule} -prove-skip 2 -prove-asserts;"
                 ),
-                f"rename {top} gate;",
-                "design -stash gate_design;",
-                "design -reset;",
-                "design -copy-from gold_design -as gold gold;",
-                "design -copy-from gate_design -as gate gate;",
-                (
-                    "equiv_make -encfile /tmp/rtl-closure-fsm.enc "
-                    "gold gate equiv;"
-                ),
+                "design -load equiv_induction_design;",
                 "hierarchy -check -top equiv;",
                 (
                     "select -set observable_equiv equiv/o:* %ci1 "
                     "equiv/t:$equiv %i;"
                 ),
-                f"select -assert-count {observable_output_bits} @observable_equiv;",
-                "equiv_simple;",
-                *reset_base_script,
-                f"equiv_induct -seq {sequential_depth};",
-                (
-                    "select -set observable_equiv equiv/o:* %ci1 "
-                    "equiv/t:$equiv %i;"
-                ),
-                "equiv_status -assert @observable_equiv;",
             )
+        script_parts = (
+            "read_verilog -sv /work/design.sv;",
+            f"hierarchy -check -top {top};",
+            "proc; memory; flatten; async2sync; opt_clean;",
+            f"rename {top} gold;",
+            "design -stash gold_design;",
+            "design -reset;",
+            "read_verilog -sv /work/design.sv;",
+            (
+                "synth -flatten -encfile /tmp/rtl-closure-fsm.enc "
+                f"-top {top}; async2sync; opt_clean;"
+            ),
+            f"rename {top} gate;",
+            "design -stash gate_design;",
+            "design -reset;",
+            "design -copy-from gold_design -as gold gold;",
+            "design -copy-from gate_design -as gate gate;",
+            (
+                "equiv_make -encfile /tmp/rtl-closure-fsm.enc "
+                "gold gate equiv;"
+            ),
+            "hierarchy -check -top equiv;",
+            (
+                "select -set observable_equiv equiv/o:* %ci1 "
+                "equiv/t:$equiv %i;"
+            ),
+            f"select -assert-count {observable_output_bits} @observable_equiv;",
+            "equiv_simple;",
+            *reset_base_script,
+            f"equiv_induct -seq {sequential_depth};",
+            (
+                "select -set observable_equiv equiv/o:* %ci1 "
+                "equiv/t:$equiv %i;"
+            ),
+            "equiv_status -assert @observable_equiv;",
         )
+        script = " ".join(script_parts)
         command = _docker_base(work, read_only_mount=True) + [
             "--entrypoint",
             "yosys",
@@ -1287,9 +1670,93 @@ def run_synthesis_equivalence(
         completed = _run_container(command, timeout, purpose="synth-equiv")
         output = (completed.stdout + "\n" + completed.stderr).strip()
         if completed.returncode != 0:
-            raise RuntimeError(
-                "Yosys synthesis equivalence failed: " + output[-5000:]
+            # ``equiv_induct`` failing is not itself a behavioral mismatch. Run
+            # a separate bounded observable-miter SAT query and require its
+            # captured model before making the stronger counterexample claim.
+            try:
+                prefix_end = script_parts.index("equiv_simple;") + 1
+            except ValueError as exc:
+                raise RuntimeError("equivalence proof script lost its miter setup") from exc
+            counterexample_path = work / "equivalence-cex.json"
+            replay_steps = base_steps if normalized_reset is not None else sequential_depth
+            replay_schedule = (" " + reset_schedule) if reset_schedule else ""
+            replay_script = " ".join(
+                (
+                    *script_parts[:prefix_end],
+                    "equiv_miter -assert equiv_counterexample @observable_equiv;",
+                    "prep -top equiv_counterexample;",
+                    (
+                        f"sat -seq {replay_steps} -set-init-def -set-def-inputs"
+                        f"{replay_schedule} -max 1 "
+                        "-dump_json /work/equivalence-cex.json -prove-asserts;"
+                    ),
+                )
             )
+            replay_command = _docker_base(work, read_only_mount=False) + [
+                "--entrypoint",
+                "yosys",
+                sandbox_image_ref(),
+                "-p",
+                replay_script,
+            ]
+            replay_completed = _run_container(
+                replay_command, timeout, purpose="synth-equiv-cex"
+            )
+            replay_output = (
+                replay_completed.stdout + "\n" + replay_completed.stderr
+            ).strip()
+            try:
+                sat_dump, sat_dump_sha256 = _read_equivalence_counterexample(
+                    counterexample_path
+                )
+            except RuntimeError:
+                sat_dump = None
+                sat_dump_sha256 = None
+            if replay_completed.returncode != 0 and sat_dump is not None:
+                return (
+                    _equivalence_counterexample(
+                        rtl,
+                        top=top,
+                        clock_port=clock_port,
+                        reset=normalized_reset,
+                        output_ports=output_ports,
+                        observable_output_bits=observable_output_bits,
+                        supporting_names=supporting_names,
+                        preparation=preparation_evidence,
+                        reset_evidence=reset_evidence,
+                        induction_script=script,
+                        induction_log=output,
+                        replay_script=replay_script,
+                        replay_log=replay_output,
+                        sat_dump=sat_dump,
+                        sat_dump_sha256=str(sat_dump_sha256),
+                    ),
+                    preparation_log + "\n" + output + "\n" + replay_output,
+                )
+            report = _equivalence_inconclusive(
+                rtl,
+                top=top,
+                clock_port=clock_port,
+                reset=normalized_reset,
+                output_ports=output_ports,
+                observable_output_bits=observable_output_bits,
+                supporting_names=supporting_names,
+                reason_code="equivalence_proof_failed_without_replayable_counterexample",
+                preparation=preparation_evidence,
+                reset_evidence=reset_evidence,
+            )
+            report["proof_evidence"] = {
+                "induction_script": script,
+                "induction_script_sha256": hashlib.sha256(script.encode()).hexdigest(),
+                "induction_log": output,
+                "induction_log_sha256": hashlib.sha256(output.encode()).hexdigest(),
+                "replay_script": replay_script,
+                "replay_script_sha256": hashlib.sha256(replay_script.encode()).hexdigest(),
+                "replay_log": replay_output,
+                "replay_log_sha256": hashlib.sha256(replay_output.encode()).hexdigest(),
+                "reset_schedule_bound_to_miter": normalized_reset is not None,
+            }
+            return report, preparation_log + "\n" + output + "\n" + replay_output
 
     found = re.findall(r"Found\s+(\d+)\s+\$equiv cells", output)
     proven = re.findall(r"Number of proven \$equiv cells:\s+(\d+)", output)
@@ -1321,8 +1788,10 @@ def run_synthesis_equivalence(
             )
         base_status = "pass"
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "pass",
+        "verdict": "proved",
+        "reason_code": None,
         "provider": "yosys_generic_synthesis_equivalence",
         "scope": (
             "post_reset_observable_outputs_rtl_vs_generic_synthesized_netlist"
@@ -1355,6 +1824,15 @@ def run_synthesis_equivalence(
         "proven_cells": proven_cells,
         "rtl_sha256": hashlib.sha256(rtl.encode("utf-8")).hexdigest(),
         "sandbox_image": sandbox_image_ref(),
+        "preparation": preparation_evidence,
+        "reset_observability": reset_evidence,
+        "proof_evidence": {
+            "script": script,
+            "script_sha256": hashlib.sha256(script.encode()).hexdigest(),
+            "log": output,
+            "log_sha256": hashlib.sha256(output.encode()).hexdigest(),
+            "reset_schedule_bound_to_miter": normalized_reset is not None,
+        },
     }
     return report, preparation_log + "\n" + output
 

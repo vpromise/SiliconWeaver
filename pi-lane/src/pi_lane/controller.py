@@ -22,6 +22,7 @@ from .assurance import evaluate_eqy_assurance, open_pdk_assurance
 from .classic import (
     CLASSIC_REGISTRY_VERSION,
     CLASSIC_STEP_PHASE,
+    CLASSIC_STEP_IDS,
     CLASSIC_TERMINAL_STEP,
     LIBRELANE_IMAGE,
     LIBRELANE_VERSION,
@@ -42,6 +43,14 @@ from .integrity import (
     file_sha256,
 )
 from .preflight import validate_config_in_image
+from .physical_plan import (
+    bind_plan_to_run,
+    geometry_drift_errors,
+    load_plan,
+    minimum_geometry_density_qualification,
+    plan_overrides,
+    validate_planning_overrides,
+)
 from .resume import (
     build_resume_plan,
     link_chain_proof,
@@ -71,9 +80,9 @@ from .run_state import (
 
 
 IMAGE = os.environ.get("PI_LANE_IMAGE", LIBRELANE_IMAGE)
-PDK_ROOT = Path(
-    os.environ.get("PI_LANE_PDK_ROOT", "~/.ciel-pi-lane")
-).expanduser().resolve()
+PDK_ROOT = (
+    Path(os.environ.get("PI_LANE_PDK_ROOT", "~/.ciel-pi-lane")).expanduser().resolve()
+)
 TERMINAL_STATES = {"completed", "failed", "incomplete", "stopped"}
 ACTIVE_STATES = {"created", "queued", "launching", "running"}
 LAUNCH_REGISTRATION_GRACE_SECONDS = 30.0
@@ -85,7 +94,31 @@ FLOW_ENDPOINTS = {
 PHYSICAL_SANITY_MIN_UTILIZATION_PCT = 10.0
 PHYSICAL_SANITY_MAX_FILLER_RATIO_PCT = 90.0
 PHYSICAL_SANITY_AREA_TOLERANCE_PCT = 5.0
+METRIC_SENTINEL_ABS = 1e20
+METRIC_UNITS = {
+    "timing__setup__ws": "ns",
+    "timing__setup__tns": "ns",
+    "timing__hold__ws": "ns",
+    "timing__hold__tns": "ns",
+    "timing__setup_vio__count": "count",
+    "timing__hold_vio__count": "count",
+    "design__max_slew_violation__count": "count",
+    "design__max_cap_violation__count": "count",
+    "design__instance__count__class:timing_repair_buffer": "count",
+    "route__wirelength": "um",
+    "global_route__wirelength": "um",
+    "route__wirelength__estimated": "um",
+    "design__instance__area": "um2",
+    "design__instance__area__stdcell": "um2",
+    "design__core__area": "um2",
+    "design__instance__area__class:fill_cell": "um2",
+    "design__instance__area__class:tap_cell": "um2",
+    "design__instance__utilization": "ratio",
+    "design__instance__utilization__stdcell": "ratio",
+    "power__total": "W",
+}
 STEP_DIR_RE = re.compile(r"^(\d+)-(.+)$")
+STEP_ID_NORMALIZE_RE = re.compile(r"[^a-z0-9]")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 ERROR_RE = re.compile(
     r"(?:\[ERROR|\]\s+ERROR\b|\bERROR\s*[:\[]|\bError:|Traceback \(most recent call last\))"
@@ -107,6 +140,7 @@ PDK_INSTALL_ROOT = STATE_ROOT / "pdk-installs"
 PDK_INSTALL_CURRENT = PDK_INSTALL_ROOT / "current"
 IMAGE_INSTALL_ROOT = STATE_ROOT / "image-installs"
 IMAGE_INSTALL_CURRENT = IMAGE_INSTALL_ROOT / "current"
+IMAGE_LOCK_SCHEMA_VERSION = 1
 EQY_TOOL_PATH = Path(__file__).with_name("eqy_tool.py").resolve()
 EQY_TOOL_MAKE_PATH = "/root/.nix-profile/bin/make"
 EQY_TOOL_AWK_PATH = "/root/.nix-profile/bin/awk"
@@ -162,6 +196,7 @@ SEALED_PUBLIC_DELIVERY_FIELDS = (
     "status_detail",
     "coarse_phase",
     "errors",
+    "physical_plan",
 )
 INTEGRITY_DEGRADATION_FIELDS = frozenset(
     {
@@ -186,7 +221,7 @@ PROXY_ENV_NAMES = (
     "no_proxy",
 )
 
-MANAGED_RUNNER_SCRIPT = r'''set +e
+MANAGED_RUNNER_SCRIPT = r"""set +e
 attempt=0
 while [ ! -f "$PI_LANE_HANDOFF_FILE" ] && [ "$attempt" -lt 300 ]; do
     sleep 0.1
@@ -202,7 +237,7 @@ tmp="${PI_LANE_EXIT_FILE}.tmp.$$"
 printf "%s\n" "$code" > "$tmp"
 mv "$tmp" "$PI_LANE_EXIT_FILE"
 exit "$code"
-'''
+"""
 
 
 def _serialized_start(
@@ -308,7 +343,9 @@ def _pdk_tree_digest(version_path: Path) -> tuple[str, int, int]:
             child = directory_path / name
             mode = os.lstat(child).st_mode
             if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-                raise ValueError(f"PDK contains an unsupported directory entry: {child}")
+                raise ValueError(
+                    f"PDK contains an unsupported directory entry: {child}"
+                )
         names.sort()
         for name in sorted(files):
             child = directory_path / name
@@ -385,7 +422,9 @@ def pdk_integrity_report(
         if manifest_path.exists() and manifest_path.is_symlink():
             raise ValueError("PDK integrity manifest must not be a symlink")
         if not manifest_path.exists():
-            if not allow_bootstrap or not _pdk_bootstrap_is_safe(version_path, revision):
+            if not allow_bootstrap or not _pdk_bootstrap_is_safe(
+                version_path, revision
+            ):
                 raise ValueError(
                     "PDK integrity manifest is missing and safe bootstrap attestation failed"
                 )
@@ -447,7 +486,9 @@ def pdk_integrity_report(
                 or file_count != actual_file_count
                 or total_bytes != actual_total_bytes
             ):
-                raise ValueError("PDK content changed after integrity manifest creation")
+                raise ValueError(
+                    "PDK content changed after integrity manifest creation"
+                )
         report.update(
             {
                 "ready": True,
@@ -497,6 +538,193 @@ def validate_image_name(image: str) -> str:
             f"pi-lane Classic registry requires the fixed LibreLane image {LIBRELANE_IMAGE}"
         )
     return image
+
+
+def _image_lock_path() -> Path:
+    return IMAGE_INSTALL_ROOT / "image-lock.json"
+
+
+def _image_lock_digest(record: Mapping[str, Any]) -> str:
+    payload = dict(record)
+    payload.pop("lock_sha256", None)
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_image_lock(record: Any) -> dict[str, Any]:
+    if not isinstance(record, Mapping):
+        raise RuntimeError("LibreLane image lock is not a JSON object")
+    value = dict(record)
+    revision = value.get("revision")
+    if (
+        value.get("schema_version") != IMAGE_LOCK_SCHEMA_VERSION
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+    ):
+        raise RuntimeError("LibreLane image lock schema or revision is malformed")
+    try:
+        validate_image_name(value.get("image"))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"LibreLane image lock identity is malformed: {exc}"
+        ) from exc
+    if (
+        not isinstance(value.get("image_digest"), str)
+        or IMAGE_DIGEST_RE.fullmatch(value["image_digest"]) is None
+        or value.get("librelane_version") != LIBRELANE_VERSION
+        or not isinstance(value.get("install_run_id"), str)
+        or RUN_ID_RE.fullmatch(value["install_run_id"]) is None
+    ):
+        raise RuntimeError("LibreLane image lock content is malformed")
+    previous = value.get("previous_lock_sha256")
+    if previous is not None and (
+        not isinstance(previous, str) or re.fullmatch(r"[0-9a-f]{64}", previous) is None
+    ):
+        raise RuntimeError("LibreLane image lock predecessor is malformed")
+    expected_hash = _image_lock_digest(value)
+    if value.get("lock_sha256") != expected_hash:
+        raise RuntimeError("LibreLane image lock digest does not match its content")
+    return value
+
+
+def load_image_lock(*, required: bool = True) -> dict[str, Any] | None:
+    path = _image_lock_path()
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if required:
+            raise RuntimeError(
+                "LibreLane image is not locked; run lane-agent image-install"
+            )
+        return None
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("LibreLane image lock must be a regular non-symlink file")
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise RuntimeError("LibreLane image lock must be owner-only")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"LibreLane image lock cannot be read: {exc}") from exc
+    return _validate_image_lock(record)
+
+
+def _record_image_lock(state: Mapping[str, Any]) -> dict[str, Any]:
+    with run_lock(IMAGE_INSTALL_ROOT / ".image-lock-state.json"):
+        return _record_image_lock_unlocked(state)
+
+
+def _record_image_lock_unlocked(state: Mapping[str, Any]) -> dict[str, Any]:
+    if state.get("status") != "completed":
+        raise RuntimeError(
+            "only a completed image installation can update the image lock"
+        )
+    image = validate_image_name(str(state.get("image") or ""))
+    expected_digest = state.get("expected_digest")
+    if expected_digest is not None and (
+        not isinstance(expected_digest, str)
+        or IMAGE_DIGEST_RE.fullmatch(expected_digest) is None
+    ):
+        raise RuntimeError("image installation expected digest is malformed")
+    observed_digest = image_id(image)
+    if observed_digest is None or observed_digest != state.get("image_digest"):
+        raise RuntimeError("installed image identity changed before lock attestation")
+    observed_version = image_librelane_version(observed_digest)
+    if observed_version != LIBRELANE_VERSION:
+        raise RuntimeError(
+            f"LibreLane image version mismatch: expected {LIBRELANE_VERSION}, "
+            f"found {observed_version or 'unavailable'}"
+        )
+    if expected_digest is not None and observed_digest != expected_digest:
+        raise RuntimeError(
+            "installed image digest does not match --expected-digest: "
+            f"expected {expected_digest}, found {observed_digest}"
+        )
+
+    previous = load_image_lock(required=False)
+    if previous is not None and (
+        previous["image"] == image
+        and previous["image_digest"] == observed_digest
+        and previous["librelane_version"] == observed_version
+    ):
+        return previous
+    replace_lock = state.get("replace_lock") is True
+    if previous is not None and not replace_lock:
+        raise RuntimeError(
+            "installed image digest differs from the persistent lock; approve an exact "
+            "replacement with lane-agent image-install --replace-lock "
+            f"--expected-digest {observed_digest}"
+        )
+    if previous is not None and expected_digest != observed_digest:
+        raise RuntimeError(
+            "replacing the image lock requires --expected-digest to match the installed digest"
+        )
+
+    record: dict[str, Any] = {
+        "schema_version": IMAGE_LOCK_SCHEMA_VERSION,
+        "revision": int(previous["revision"]) + 1 if previous is not None else 1,
+        "image": image,
+        "image_digest": observed_digest,
+        "librelane_version": observed_version,
+        "install_run_id": state["run_id"],
+        "locked_at": now_iso(),
+        "previous_lock_sha256": (
+            previous["lock_sha256"] if previous is not None else None
+        ),
+    }
+    record["lock_sha256"] = _image_lock_digest(record)
+    atomic_write(
+        _image_lock_path(),
+        json.dumps(record, indent=2, sort_keys=True) + "\n",
+        mode=0o400,
+    )
+    persisted = load_image_lock(required=True)
+    if persisted != record:
+        raise RuntimeError(
+            "persisted LibreLane image lock did not verify after writing"
+        )
+    return record
+
+
+def require_locked_image(image: str = IMAGE) -> dict[str, Any]:
+    image = validate_image_name(image)
+    lock = load_image_lock(required=True)
+    assert lock is not None
+    if lock["image"] != image:
+        raise RuntimeError(
+            "requested LibreLane image does not match the persistent lock"
+        )
+    observed_digest = image_id(image)
+    if observed_digest is None:
+        raise RuntimeError(
+            f"LibreLane image is unavailable: {image}; run lane-agent image-install"
+        )
+    if observed_digest != lock["image_digest"]:
+        raise RuntimeError(
+            "installed LibreLane image digest differs from the persistent lock; "
+            "run lane-agent image-install and explicitly approve any replacement"
+        )
+    observed_version = image_librelane_version(observed_digest)
+    if observed_version != lock["librelane_version"]:
+        raise RuntimeError("installed LibreLane image version differs from its lock")
+    return {
+        **lock,
+        "lock_path": str(_image_lock_path()),
+    }
+
+
+def image_lock_report(image: str = IMAGE) -> dict[str, Any]:
+    try:
+        identity = require_locked_image(image)
+    except (RuntimeError, ValueError) as exc:
+        return {
+            "ready": False,
+            "path": str(_image_lock_path()),
+            "error": str(exc),
+        }
+    return {"ready": True, "path": str(_image_lock_path()), **identity}
 
 
 def validate_pdk_root(pdk_root: Path) -> Path:
@@ -599,7 +827,9 @@ def refresh_image_install(state: dict[str, Any]) -> dict[str, Any]:
         return state
     installed_digest = image_id(state["image"])
     installed_version = (
-        image_librelane_version(state["image"]) if installed_digest is not None else None
+        image_librelane_version(state["image"])
+        if installed_digest is not None
+        else None
     )
     if state.get("stop_requested") and not running:
         status = "stopped"
@@ -635,6 +865,29 @@ def refresh_image_install(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def _attest_image_install_lock(state: dict[str, Any]) -> dict[str, Any]:
+    if state.get("status") != "completed" or state.get("image_lock_attested") is True:
+        return state
+    try:
+        lock = _record_image_lock(state)
+    except (RuntimeError, ValueError, KeyError) as exc:
+        message = f"image lock attestation failed: {exc}"
+        state["status"] = "failed"
+        state["image_lock_attested"] = False
+        state["image_lock_error"] = message
+        state["errors"] = [*(state.get("errors") or []), message][-8:]
+        return state
+    state.update(
+        {
+            "image_lock_attested": True,
+            "image_lock_path": str(_image_lock_path()),
+            "image_lock_sha256": lock["lock_sha256"],
+            "image_lock_revision": lock["revision"],
+        }
+    )
+    return state
+
+
 def _record_install_launch_failure(
     state: dict[str, Any], *, message: str, exit_code: int = 125
 ) -> None:
@@ -662,13 +915,27 @@ def _record_install_launch_failure(
 
 
 @_serialized_start
-def start_image_install(image: str = IMAGE) -> dict[str, Any]:
+def start_image_install(
+    image: str = IMAGE,
+    *,
+    expected_digest: str | None = None,
+    replace_lock: bool = False,
+) -> dict[str, Any]:
     image = validate_image_name(image)
+    if expected_digest is not None and (
+        not isinstance(expected_digest, str)
+        or IMAGE_DIGEST_RE.fullmatch(expected_digest) is None
+    ):
+        raise ValueError("expected image digest must use sha256:<64 lowercase hex>")
+    if replace_lock and expected_digest is None:
+        raise ValueError("--replace-lock requires --expected-digest")
     if IMAGE_INSTALL_CURRENT.is_file():
         try:
             active = refresh_image_install(_load_image_install())
             if active["status"] in {"launching", "running"}:
-                raise RuntimeError(f"an image installation is already active: {active['run_id']}")
+                raise RuntimeError(
+                    f"an image installation is already active: {active['run_id']}"
+                )
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             pass
     run_id = _managed_install_id(IMAGE_INSTALL_ROOT, "image-install")
@@ -691,6 +958,9 @@ def start_image_install(image: str = IMAGE) -> dict[str, Any]:
         "status": "launching",
         "image": image,
         "image_digest": image_id(image),
+        "expected_digest": expected_digest,
+        "replace_lock": replace_lock,
+        "image_lock_attested": False,
         "started_at": now_iso(),
         "started_epoch": time.time(),
         "stop_requested": False,
@@ -745,13 +1015,25 @@ def start_image_install(image: str = IMAGE) -> dict[str, Any]:
         raise
     finally:
         output.close()
-    return refresh_image_install(state)
+    refreshed = _attest_image_install_lock(refresh_image_install(state))
+    if refreshed != state and refreshed.get("status") in {
+        "completed",
+        "failed",
+        "stopped",
+    }:
+        save_state(refreshed)
+    return refreshed
 
 
 def image_install_status(run_id: str | None = None) -> dict[str, Any]:
     original = _load_image_install(run_id)
     refreshed = refresh_image_install(original)
-    if refreshed != original and refreshed.get("status") in {"completed", "failed", "stopped"}:
+    refreshed = _attest_image_install_lock(refreshed)
+    if refreshed != original and refreshed.get("status") in {
+        "completed",
+        "failed",
+        "stopped",
+    }:
         save_state(refreshed)
     return refreshed
 
@@ -762,7 +1044,9 @@ def stop_image_install(run_id: str | None = None) -> dict[str, Any]:
         return state
     expected_start = state.get("pid_start_time")
     if not isinstance(expected_start, int) or isinstance(expected_start, bool):
-        raise RuntimeError("refusing to stop an image install without a persisted PID identity")
+        raise RuntimeError(
+            "refusing to stop an image install without a persisted PID identity"
+        )
     state["stop_requested"] = True
     if pid_identity_alive(state.get("pid"), expected_start):
         try:
@@ -780,9 +1064,11 @@ def build_pdk_install_command(
     pdk_root: Path,
     run_id: str,
     image: str = IMAGE,
+    runtime_image_ref: str,
     proxy_env: Mapping[str, str] | None = None,
 ) -> tuple[list[str], str]:
     image = validate_image_name(image)
+    runtime_image_ref = validate_runtime_image_ref(runtime_image_ref)
     if pdk not in PDK_REVISIONS:
         raise ValueError(f"unsupported PDK: {pdk}")
     family, revision = PDK_REVISIONS[pdk]
@@ -797,6 +1083,10 @@ def build_pdk_install_command(
         container_name,
         "--label",
         f"io.pi-lane.pdk-install-id={run_id}",
+        "--label",
+        f"io.pi-lane.image-tag={image}",
+        "--label",
+        f"io.pi-lane.image-digest={runtime_image_ref}",
         "--read-only",
         "--cap-drop",
         "ALL",
@@ -817,7 +1107,7 @@ def build_pdk_install_command(
             "HOME=/tmp",
             "-v",
             f"{pdk_root}:{pdk_root}:rw",
-            image,
+            runtime_image_ref,
             "ciel",
             "enable",
             "--pdk",
@@ -910,21 +1200,16 @@ def start_pdk_install(
     image = validate_image_name(image)
     if pdk not in PDK_REVISIONS:
         raise ValueError(f"unsupported PDK: {pdk}")
-    if image_id(image) is None:
-        raise RuntimeError(
-            f"LibreLane image is unavailable: {image}; run lane-agent image-install"
-        )
-    image_version = image_librelane_version(image)
-    if image_version != LIBRELANE_VERSION:
-        raise RuntimeError(
-            f"LibreLane image version mismatch: expected {LIBRELANE_VERSION}, "
-            f"found {image_version or 'unavailable'}"
-        )
+    image_lock = require_locked_image(image)
+    image_digest = str(image_lock["image_digest"])
+    image_version = str(image_lock["librelane_version"])
     if PDK_INSTALL_CURRENT.is_file():
         try:
             active = refresh_pdk_install(_load_pdk_install())
             if active["status"] in {"launching", "running"}:
-                raise RuntimeError(f"a PDK installation is already active: {active['run_id']}")
+                raise RuntimeError(
+                    f"a PDK installation is already active: {active['run_id']}"
+                )
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             pass
 
@@ -943,6 +1228,7 @@ def start_pdk_install(
         pdk_root=pdk_root,
         run_id=run_id,
         image=image,
+        runtime_image_ref=image_digest,
         proxy_env=proxy_env,
     )
     family, revision = PDK_REVISIONS[pdk]
@@ -963,7 +1249,11 @@ def start_pdk_install(
         "revision": revision,
         "pdk_root": str(pdk_root),
         "image": image,
-        "image_digest": image_id(image),
+        "image_digest": image_digest,
+        "runtime_image_ref": image_digest,
+        "image_lock_path": image_lock["lock_path"],
+        "image_lock_sha256": image_lock["lock_sha256"],
+        "image_lock_revision": image_lock["revision"],
         "librelane_version": image_version,
         "network_mode": "host" if pdk_proxy_uses_loopback(proxy_env) else "bridge",
         "proxy_environment": sorted(proxy_env),
@@ -1021,7 +1311,11 @@ def start_pdk_install(
 def pdk_install_status(run_id: str | None = None) -> dict[str, Any]:
     original = _load_pdk_install(run_id)
     refreshed = refresh_pdk_install(original)
-    if refreshed != original and refreshed.get("status") in {"completed", "failed", "stopped"}:
+    if refreshed != original and refreshed.get("status") in {
+        "completed",
+        "failed",
+        "stopped",
+    }:
         save_state(refreshed)
     return refreshed
 
@@ -1032,7 +1326,9 @@ def stop_pdk_install(run_id: str | None = None) -> dict[str, Any]:
         return state
     expected_start = state.get("pid_start_time")
     if not isinstance(expected_start, int) or isinstance(expected_start, bool):
-        raise RuntimeError("refusing to stop a PDK install without a persisted PID identity")
+        raise RuntimeError(
+            "refusing to stop a PDK install without a persisted PID identity"
+        )
     state["stop_requested"] = True
     if state.get("container_name"):
         subprocess.run(
@@ -1120,7 +1416,9 @@ def _eqy_runtime_inputs(config: DesignConfig) -> dict[str, Any] | None:
     if config.raw.get("RUN_EQY", False) is not True:
         return None
     script_reference = config.raw.get("EQY_SCRIPT")
-    if not isinstance(script_reference, str) or not script_reference.startswith("dir::"):
+    if not isinstance(script_reference, str) or not script_reference.startswith(
+        "dir::"
+    ):
         raise ValueError("RUN_EQY requires a design-relative EQY_SCRIPT")
     relative_script = script_reference.removeprefix("dir::")
     if not relative_script or Path(relative_script).is_absolute():
@@ -1166,9 +1464,7 @@ def _eqy_runtime_inputs(config: DesignConfig) -> dict[str, Any] | None:
     }
 
 
-def _materialize_eqy_tool(
-    runtime: Mapping[str, Any], controller_dir: Path
-) -> Path:
+def _materialize_eqy_tool(runtime: Mapping[str, Any], controller_dir: Path) -> Path:
     """Create the executable run-local EQY launcher from packaged source bytes."""
 
     source = canonical_regular_file(
@@ -1192,10 +1488,7 @@ def _materialize_eqy_tool(
     try:
         descriptor = os.open(
             target,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             0o555,
         )
         created = True
@@ -1209,9 +1502,7 @@ def _materialize_eqy_tool(
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
-        directory = os.open(
-            controller_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        )
+        directory = os.open(controller_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(directory)
         finally:
@@ -1227,7 +1518,9 @@ def _materialize_eqy_tool(
             not os.access(materialized, os.X_OK)
             or file_sha256(materialized) != expected_sha256
         ):
-            raise ValueError("run-local restricted EQY tool is not executable or changed")
+            raise ValueError(
+                "run-local restricted EQY tool is not executable or changed"
+            )
         return materialized
     except BaseException:
         if descriptor is not None:
@@ -1258,6 +1551,12 @@ def build_docker_command(
 ) -> tuple[list[str], str]:
     image = validate_image_name(image)
     runtime_image_ref = validate_runtime_image_ref(runtime_image_ref)
+    if (
+        not isinstance(run_id, str)
+        or RUN_ID_RE.fullmatch(run_id) is None
+        or tag != f"PI_LANE_{run_id}"
+    ):
+        raise ValueError("container run tag must be the exact PI_LANE_<run-id> path")
     container_name = f"pi-lane-{run_id}"
     command = [
         "docker",
@@ -1292,7 +1591,7 @@ def build_docker_command(
         "-v",
         f"{input_snapshot_dir or config.design_dir}:{config.design_dir}:ro",
         "-v",
-        f"{config.design_dir / 'runs'}:{config.design_dir / 'runs'}:rw",
+        f"{config.design_dir / 'runs' / tag}:{config.design_dir / 'runs' / tag}:rw",
         "-v",
         f"{pdk_root}:{pdk_root}:ro",
         "-w",
@@ -1358,6 +1657,7 @@ def _validate_tracking_id(value: str | None, *, label: str) -> str | None:
     return value
 
 
+
 def _start_request_fingerprint(
     config: DesignConfig,
     *,
@@ -1369,6 +1669,9 @@ def _start_request_fingerprint(
     parent_run_id: str | None,
     initial_state_sha256: str | None,
     input_bundle_sha256: str,
+    physical_plan_sha256: str | None = None,
+    planning_probe_sha256: str | None = None,
+    visualization_enabled: bool = True,
 ) -> str:
     request = {
         "config_sha256": config.sha256,
@@ -1382,6 +1685,9 @@ def _start_request_fingerprint(
         "parent_run_id": parent_run_id,
         "initial_state_sha256": initial_state_sha256,
         "input_bundle_sha256": input_bundle_sha256,
+        "physical_plan_sha256": physical_plan_sha256,
+        "planning_probe_sha256": planning_probe_sha256,
+        "visualization_enabled": visualization_enabled,
     }
     return hashlib.sha256(
         json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1398,10 +1704,15 @@ def _idempotent_run(
             state = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(state, dict) or state.get("idempotency_key") != idempotency_key:
+        if (
+            not isinstance(state, dict)
+            or state.get("idempotency_key") != idempotency_key
+        ):
             continue
         if state.get("request_fingerprint") != request_fingerprint:
-            raise RuntimeError("idempotency key was already used for a different Lane request")
+            raise RuntimeError(
+                "idempotency key was already used for a different Lane request"
+            )
         return refresh_status(state)
     return None
 
@@ -1411,6 +1722,8 @@ def _materialize_design_snapshot(
     *,
     manifest: Mapping[str, Any],
     captured: Mapping[str, bytes],
+    run_tag: str | None = None,
+    extra_run_tags: Iterable[str] = (),
 ) -> None:
     if snapshot_root.exists():
         raise RuntimeError(f"design input snapshot already exists: {snapshot_root}")
@@ -1421,12 +1734,21 @@ def _materialize_design_snapshot(
         relative = str(row["path"])
         content = captured.get(relative)
         if content is None or hashlib.sha256(content).hexdigest() != row.get("sha256"):
-            raise RuntimeError(f"captured design input does not match its manifest: {relative}")
+            raise RuntimeError(
+                f"captured design input does not match its manifest: {relative}"
+            )
         destination = snapshot_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         destination.write_bytes(content)
         destination.chmod(0o400)
     (snapshot_root / "runs").mkdir(mode=0o700)
+    run_tags = list(extra_run_tags)
+    if run_tag is not None:
+        run_tags.append(run_tag)
+    for tag in run_tags:
+        if not isinstance(tag, str) or not RUN_ID_RE.fullmatch(tag):
+            raise RuntimeError("design input snapshot run tag is malformed")
+        (snapshot_root / "runs" / tag).mkdir(mode=0o700)
     for directory in sorted(
         (path for path in snapshot_root.rglob("*") if path.is_dir()),
         key=lambda path: len(path.parts),
@@ -1534,9 +1856,7 @@ def build_visualizer_command(
     return command
 
 
-def _terminate_spawned_process(
-    pid: int, *, container_name: str | None = None
-) -> None:
+def _terminate_spawned_process(pid: int, *, container_name: str | None = None) -> None:
     try:
         os.killpg(pid, signal.SIGTERM)
     except OSError:
@@ -1608,6 +1928,10 @@ def start_run(
     idempotency_key: str | None = None,
     origin: str = "lane-agent",
     expected_input_bundle_sha256: str | None = None,
+    physical_plan_path: Path | None = None,
+    planning_probe: Mapping[str, Any] | None = None,
+    visualization_enabled: bool = True,
+    claim_current: bool = True,
 ) -> dict[str, Any]:
     config = load_design_config(config_path, pdk_override=pdk, flow_override=flow)
     input_manifest, captured_inputs = capture_design_inputs(config)
@@ -1636,43 +1960,70 @@ def start_run(
         )
     if initial_state is not None and (frm is None or parent_run_id is None):
         raise ValueError("initial State requires a parent run and an exact --from Step")
-    if initial_state is not None and (
-        not resume_root_run_id
-        or isinstance(resume_chain_depth, bool)
-        or not isinstance(resume_chain_depth, int)
-        or resume_chain_depth < 1
-        or not isinstance(resume_parent_state_attestation_sha256, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", resume_parent_state_attestation_sha256)
-        or not isinstance(resume_parent_chain_proof_sha256, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", resume_parent_chain_proof_sha256)
+    if (
+        initial_state is not None
+        and planning_probe is None
+        and (
+            not resume_root_run_id
+            or isinstance(resume_chain_depth, bool)
+            or not isinstance(resume_chain_depth, int)
+            or resume_chain_depth < 1
+            or not isinstance(resume_parent_state_attestation_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", resume_parent_state_attestation_sha256)
+            or not isinstance(resume_parent_chain_proof_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", resume_parent_chain_proof_sha256)
+        )
     ):
         raise ValueError("resume chain provenance is incomplete")
+    if planning_probe is not None:
+        if physical_plan_path is not None:
+            raise ValueError(
+                "a planning probe cannot consume a completed physical plan"
+            )
+        if initial_state is None or frm is None or parent_run_id is None:
+            raise ValueError(
+                "planning probe requires a parent baseline State and --from"
+            )
+        required_probe = {
+            "schema_version",
+            "plan_id",
+            "candidate_id",
+            "policy_sha256",
+            "parent_run_id",
+            "parent_run_dir",
+            "baseline_state_sha256",
+        }
+        if (
+            set(planning_probe) != required_probe
+            or planning_probe.get("schema_version") != 1
+        ):
+            raise ValueError("planning probe provenance is malformed")
+        if planning_probe.get("parent_run_id") != parent_run_id:
+            raise ValueError("planning probe parent identity is inconsistent")
+        for key in ("policy_sha256", "baseline_state_sha256"):
+            if (
+                not isinstance(planning_probe.get(key), str)
+                or re.fullmatch(r"[0-9a-f]{64}", str(planning_probe.get(key))) is None
+            ):
+                raise ValueError(f"planning probe {key} is malformed")
     validated_initial_state: Path | None = None
     validated_initial_state_sha256: str | None = None
     if initial_state is not None:
-        validated_initial_state, validated_initial_state_sha256 = validate_initial_state(
-            initial_state, config.design_dir
+        validated_initial_state, validated_initial_state_sha256 = (
+            validate_initial_state(initial_state, config.design_dir)
         )
         if (
             initial_state_sha256 is not None
             and validated_initial_state_sha256 != initial_state_sha256
         ):
             raise ValueError("initial State changed after resume validation")
-    image_digest = image_id(image)
-    if image_digest is None:
-        raise RuntimeError(f"LibreLane image is unavailable: {image}; run lane-agent image-install")
+    image_lock = require_locked_image(image)
+    image_digest = str(image_lock["image_digest"])
     runtime_image_ref = validate_runtime_image_ref(image_digest)
-    image_version = image_librelane_version(runtime_image_ref)
-    if image_version != LIBRELANE_VERSION:
-        raise RuntimeError(
-            f"LibreLane image version mismatch: expected {LIBRELANE_VERSION}, "
-            f"found {image_version or 'unavailable'}"
-        )
+    image_version = str(image_lock["librelane_version"])
     pdk_root = validate_pdk_root(pdk_root)
     pdk_revision = installed_pdk_revision(config.pdk, pdk_root)
-    pdk_integrity = pdk_integrity_report(
-        config.pdk, pdk_root, allow_bootstrap=True
-    )
+    pdk_integrity = pdk_integrity_report(config.pdk, pdk_root, allow_bootstrap=True)
     if not pdk_integrity["ready"]:
         raise RuntimeError(
             f"PDK {config.pdk} at {pdk_root / config.pdk} is missing or does not "
@@ -1681,7 +2032,34 @@ def start_run(
             f"integrity error: {pdk_integrity.get('error') or 'unknown'}"
         )
     assert pdk_revision is not None
-    validated_overrides = [validate_override(value) for value in overrides]
+    validated_overrides = (
+        validate_planning_overrides(overrides)
+        if planning_probe is not None
+        else [validate_override(value) for value in overrides]
+    )
+    physical_plan: dict[str, Any] | None = None
+    physical_plan_binding: dict[str, Any] | None = None
+    if physical_plan_path is not None:
+        physical_plan = load_plan(physical_plan_path)
+        physical_plan_binding = bind_plan_to_run(
+            physical_plan,
+            config_sha256=config.sha256,
+            input_bundle_sha256=str(input_manifest["bundle_sha256"]),
+            pdk=config.pdk,
+            pdk_revision=pdk_revision,
+            pdk_integrity_sha256=str(pdk_integrity["tree_sha256"]),
+            image_digest=image_digest,
+        )
+        validated_overrides.extend(plan_overrides(physical_plan))
+    planning_probe_sha256 = (
+        hashlib.sha256(
+            json.dumps(planning_probe, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        if planning_probe is not None
+        else None
+    )
     workflow_id = _validate_tracking_id(workflow_id, label="workflow_id")
     attempt_id = _validate_tracking_id(attempt_id, label="attempt_id")
     idempotency_key = _validate_tracking_id(idempotency_key, label="idempotency_key")
@@ -1697,6 +2075,9 @@ def start_run(
         parent_run_id=parent_run_id,
         initial_state_sha256=validated_initial_state_sha256,
         input_bundle_sha256=str(input_manifest["bundle_sha256"]),
+        physical_plan_sha256=(physical_plan or {}).get("plan_sha256"),
+        planning_probe_sha256=planning_probe_sha256,
+        visualization_enabled=visualization_enabled,
     )
     previous = _idempotent_run(idempotency_key, request_fingerprint)
     if previous is not None:
@@ -1705,13 +2086,40 @@ def start_run(
         config, input_bundle_sha256=str(input_manifest["bundle_sha256"])
     )
     if duplicate and not allow_concurrent:
-        raise RuntimeError(f"an equivalent run is already active: {duplicate['run_id']}")
+        raise RuntimeError(
+            f"an equivalent run is already active: {duplicate['run_id']}"
+        )
     run_id = make_run_id(config.design_name)
+    tag = f"PI_LANE_{run_id}"
     controller_dir = STATE_ROOT / run_id
     controller_dir.mkdir(parents=True, mode=0o700)
     input_snapshot_dir = controller_dir / "input-snapshot"
+    extra_run_tags: tuple[str, ...] = ()
+    if planning_probe is not None:
+        parent_run_dir = canonical_directory(
+            Path(str(planning_probe["parent_run_dir"])),
+            label="planning baseline run directory",
+        )
+        expected_runs_root = canonical_directory(
+            config.design_dir / "runs", label="planning design runs directory"
+        )
+        try:
+            relative_parent = parent_run_dir.relative_to(expected_runs_root)
+        except ValueError as exc:
+            raise ValueError(
+                "planning baseline run directory must belong to the design runs directory"
+            ) from exc
+        if len(relative_parent.parts) != 1 or not RUN_ID_RE.fullmatch(
+            relative_parent.name
+        ):
+            raise ValueError("planning baseline run directory identity is invalid")
+        extra_run_tags = (relative_parent.name,)
     _materialize_design_snapshot(
-        input_snapshot_dir, manifest=input_manifest, captured=captured_inputs
+        input_snapshot_dir,
+        manifest=input_manifest,
+        captured=captured_inputs,
+        run_tag=tag,
+        extra_run_tags=extra_run_tags,
     )
     try:
         config_preflight = validate_config_in_image(
@@ -1750,7 +2158,7 @@ def start_run(
             initial_state_sha256=validated_initial_state_sha256,
             input_bundle_sha256=str(input_manifest["bundle_sha256"]),
         )
-        if initial_state is not None
+        if initial_state is not None and planning_probe is None
         else None
     )
     input_manifest_path = controller_dir / "input-manifest.json"
@@ -1763,14 +2171,39 @@ def start_run(
     if validated_initial_state is not None:
         resume_bytes = validated_initial_state.read_bytes()
         if hashlib.sha256(resume_bytes).hexdigest() != validated_initial_state_sha256:
-            raise ValueError("initial State changed while its immutable snapshot was captured")
+            raise ValueError(
+                "initial State changed while its immutable snapshot was captured"
+            )
         resume_input_snapshot = controller_dir / "resume-input.state"
         resume_input_snapshot.write_bytes(resume_bytes)
         resume_input_snapshot.chmod(0o400)
         pinned_file_mounts[resume_input_snapshot] = validated_initial_state
-    tag = f"PI_LANE_{run_id}"
+        if planning_probe is not None:
+            parent_run_dir = canonical_directory(
+                Path(str(planning_probe["parent_run_dir"])),
+                label="planning baseline run directory",
+            )
+            expected_runs_root = canonical_directory(
+                config.design_dir / "runs", label="planning design runs directory"
+            )
+            parent_run_dir.relative_to(expected_runs_root)
+            validated_initial_state.relative_to(parent_run_dir)
+            pinned_file_mounts[parent_run_dir] = parent_run_dir
+    physical_plan_snapshot: Path | None = None
+    if physical_plan is not None and physical_plan_binding is not None:
+        physical_plan_snapshot = controller_dir / "physical-plan.json"
+        atomic_write(
+            physical_plan_snapshot,
+            json.dumps(physical_plan, indent=2, sort_keys=True) + "\n",
+        )
+        physical_plan_snapshot.chmod(0o400)
+        physical_plan_binding = {
+            **physical_plan_binding,
+            "path": str(physical_plan_snapshot),
+        }
     (config.design_dir / "runs").mkdir(parents=True, exist_ok=True, mode=0o700)
     lane_run_dir = config.design_dir / "runs" / tag
+    lane_run_dir.mkdir(mode=0o700)
     exit_file = controller_dir / "exit_code"
     handoff_file = controller_dir / "launch_handoff"
     build_log = controller_dir / "build.log"
@@ -1824,7 +2257,7 @@ def start_run(
             "image_digest": image_digest,
             "runtime_image_ref": runtime_image_ref,
             "run_id": run_id,
-            "workflow_id": workflow_id,
+                "workflow_id": workflow_id,
             "attempt_id": attempt_id,
             "input_bundle_sha256": input_manifest["bundle_sha256"],
         },
@@ -1848,15 +2281,29 @@ def start_run(
         "pdk_root": str(pdk_root),
         "flow": config.flow,
         "flow_registry_version": (
-            CLASSIC_REGISTRY_VERSION
-            if config.flow.casefold() == "classic"
-            else None
+            CLASSIC_REGISTRY_VERSION if config.flow.casefold() == "classic" else None
         ),
         "tag": tag,
         "librelane_run_dir": str(lane_run_dir),
         "image": image,
         "image_digest": image_digest,
         "runtime_image_ref": runtime_image_ref,
+        "image_lock": {
+            key: image_lock[key]
+            for key in (
+                "schema_version",
+                "revision",
+                "image",
+                "image_digest",
+                "librelane_version",
+                "install_run_id",
+                "locked_at",
+                "previous_lock_sha256",
+                "lock_sha256",
+            )
+        },
+        "image_lock_path": image_lock["lock_path"],
+        "image_lock_sha256": image_lock["lock_sha256"],
         "librelane_version": image_version,
         "overrides": validated_overrides,
         "from": frm,
@@ -1870,9 +2317,7 @@ def start_run(
             eqy_runtime["script_sha256"] if eqy_runtime is not None else None
         ),
         "eqy_gate_tcl_path": (
-            str(eqy_runtime["gate_tcl_path"])
-            if eqy_runtime is not None
-            else None
+            str(eqy_runtime["gate_tcl_path"]) if eqy_runtime is not None else None
         ),
         "eqy_gate_tcl_sha256": (
             eqy_runtime["gate_tcl_sha256"] if eqy_runtime is not None else None
@@ -1885,7 +2330,9 @@ def start_run(
         ),
         "parent_run_id": parent_run_id,
         "initial_state": (
-            str(validated_initial_state) if validated_initial_state is not None else None
+            str(validated_initial_state)
+            if validated_initial_state is not None
+            else None
         ),
         "initial_state_sha256": validated_initial_state_sha256,
         "initial_state_snapshot": (
@@ -1904,9 +2351,13 @@ def start_run(
                 "parent_chain_proof_sha256": resume_parent_chain_proof_sha256,
                 "chain_proof_sha256": resume_chain_proof_sha256,
             }
-            if parent_run_id is not None and validated_initial_state is not None
+            if parent_run_id is not None
+            and validated_initial_state is not None
+            and planning_probe is None
             else None
         ),
+        "planning_probe": dict(planning_probe) if planning_probe is not None else None,
+        "physical_plan": physical_plan_binding,
         "visualization_dir": str(lane_run_dir / "visualizations"),
         "visualizer_pid": None,
         "visualizer_pid_start_time": None,
@@ -1936,7 +2387,8 @@ def start_run(
             },
         ),
     )
-    set_current(run_id)
+    if claim_current:
+        set_current(run_id)
     output = build_log.open("ab", buffering=0)
     try:
         process = subprocess.Popen(
@@ -2025,32 +2477,34 @@ def start_run(
         )
         raise RuntimeError(message)
 
-    visualizer_command = build_visualizer_command(
-        run_id=run_id,
-        run_dir=lane_run_dir,
-        design_dir=config.design_dir,
-        design_name=config.design_name,
-        config_path=config.path,
-        input_snapshot_dir=input_snapshot_dir,
-        input_bundle_sha256=str(input_manifest["bundle_sha256"]),
-        pdk=config.pdk,
-        pdk_root=pdk_root,
-        image=image,
-        runtime_image_ref=runtime_image_ref,
-        config_sha256=config.sha256,
-        pdk_revision=pdk_revision,
-        pdk_integrity_sha256=pdk_integrity["tree_sha256"],
-        image_digest=image_digest,
-        librelane_version=image_version,
-        main_exit_file=exit_file,
-        main_pid=process.pid,
-        main_pid_start_time=main_pid_start_time,
-        visualizer_exit_file=visualizer_exit_file,
-        overrides=validated_overrides,
-    )
-    visualizer_process = _spawn_visualizer(
-        visualizer_command, cwd=config.design_dir, log_path=visualizer_log
-    )
+    visualizer_process: tuple[int, int] | None = None
+    if visualization_enabled:
+        visualizer_command = build_visualizer_command(
+            run_id=run_id,
+            run_dir=lane_run_dir,
+            design_dir=config.design_dir,
+            design_name=config.design_name,
+            config_path=config.path,
+            input_snapshot_dir=input_snapshot_dir,
+            input_bundle_sha256=str(input_manifest["bundle_sha256"]),
+            pdk=config.pdk,
+            pdk_root=pdk_root,
+            image=image,
+            runtime_image_ref=runtime_image_ref,
+            config_sha256=config.sha256,
+            pdk_revision=pdk_revision,
+            pdk_integrity_sha256=pdk_integrity["tree_sha256"],
+            image_digest=image_digest,
+            librelane_version=image_version,
+            main_exit_file=exit_file,
+            main_pid=process.pid,
+            main_pid_start_time=main_pid_start_time,
+            visualizer_exit_file=visualizer_exit_file,
+            overrides=validated_overrides,
+        )
+        visualizer_process = _spawn_visualizer(
+            visualizer_command, cwd=config.design_dir, log_path=visualizer_log
+        )
     state.update(
         {
             "pid": process.pid,
@@ -2058,7 +2512,7 @@ def start_run(
             "status": "running",
             "started_at": now_iso(),
             "started_epoch": time.time(),
-            "visualizer_launch_attempted": True,
+            "visualizer_launch_attempted": visualization_enabled,
             "visualizer_pid": (
                 visualizer_process[0] if visualizer_process is not None else None
             ),
@@ -2155,6 +2609,18 @@ def _freeze_elapsed(state: dict[str, Any], status: str, exit_file: Path) -> None
 
 
 def _step_id(step_dir: Path) -> str:
+    # LibreLane's config metadata retains only a Step implementation name.
+    # Repeated Classic Steps therefore all report e.g. OpenROAD.STAMidPNR,
+    # while the normalized identity suffix (-1, -2, -3) is preserved in the
+    # directory name. Prefer a directory identity only when it maps exactly
+    # to this pinned Classic registry; unknown/custom Steps continue to use
+    # their metadata below.
+    match = STEP_DIR_RE.match(step_dir.name)
+    if match:
+        directory_id = STEP_ID_NORMALIZE_RE.sub("", match.group(2).lower())
+        for classic_id in CLASSIC_STEP_IDS:
+            if STEP_ID_NORMALIZE_RE.sub("", classic_id.lower()) == directory_id:
+                return classic_id
     config_path = step_dir / "config.json"
     try:
         config_file = canonical_regular_file(
@@ -2170,7 +2636,6 @@ def _step_id(step_dir: Path) -> str:
             return meta["step"]
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
-    match = STEP_DIR_RE.match(step_dir.name)
     return match.group(2) if match else step_dir.name
 
 
@@ -2289,7 +2754,11 @@ def discover_visualization(state: Mapping[str, Any]) -> dict[str, Any]:
                         "overrides": list(state.get("overrides") or []),
                     }
                     for key, expected in expected_identity.items():
-                        if expected is None or key not in manifest or manifest[key] != expected:
+                        if (
+                            expected is None
+                            or key not in manifest
+                            or manifest[key] != expected
+                        ):
                             manifest_error = (
                                 f"visualization manifest {key} identity mismatch"
                             )
@@ -2312,9 +2781,7 @@ def discover_visualization(state: Mapping[str, Any]) -> dict[str, Any]:
             or counter_value < 0
         ):
             if manifest_error is None:
-                manifest_error = (
-                    f"visualization manifest {counter_name} must be a non-negative integer"
-                )
+                manifest_error = f"visualization manifest {counter_name} must be a non-negative integer"
             manifest_counters[counter_name] = 0
         else:
             manifest_counters[counter_name] = counter_value
@@ -2323,10 +2790,10 @@ def discover_visualization(state: Mapping[str, Any]) -> dict[str, Any]:
     pid_start = state.get("visualizer_pid_start_time")
     exit_path_value = state.get("visualizer_exit_file")
     exit_code = _read_exit_code(Path(str(exit_path_value))) if exit_path_value else None
-    running = _visualizer_pid_alive(
-        pid, pid_start, str(state.get("run_id") or "")
+    running = _visualizer_pid_alive(pid, pid_start, str(state.get("run_id") or ""))
+    launch_attempted = (
+        state.get("visualizer_launch_attempted") is True or pid is not None
     )
-    launch_attempted = state.get("visualizer_launch_attempted") is True or pid is not None
     manifest_status = (
         str(manifest["status"]) if isinstance(manifest.get("status"), str) else None
     )
@@ -2369,9 +2836,7 @@ def discover_visualization(state: Mapping[str, Any]) -> dict[str, Any]:
         and not running
         and manifest_status not in terminal_manifest_states
     ):
-        errors.append(
-            "visualization sidecar exited before writing a terminal manifest"
-        )
+        errors.append("visualization sidecar exited before writing a terminal manifest")
     if status == "failed" and not errors and state.get("visualizer_log"):
         errors = _tail_lines(Path(str(state["visualizer_log"])), 8)
     return {
@@ -2385,9 +2850,7 @@ def discover_visualization(state: Mapping[str, Any]) -> dict[str, Any]:
         "timeline": str(timeline_path),
         "completed_step_count": manifest_counters["completed_step_count"],
         "visualization_count": manifest_counters["visualization_count"],
-        "failed_visualization_count": manifest_counters[
-            "failed_visualization_count"
-        ],
+        "failed_visualization_count": manifest_counters["failed_visualization_count"],
         "latest_image": manifest.get("latest_image"),
         "images": [str(path) for path in images],
         "errors": [str(error) for error in errors][-8:],
@@ -2417,10 +2880,7 @@ def _visualizer_pid_alive(
         and decoded[index + 1] == run_id
         for index, argument in enumerate(decoded)
     )
-    return (
-        "pi_lane.visualizer" in decoded
-        and run_id_matches
-    )
+    return "pi_lane.visualizer" in decoded and run_id_matches
 
 
 def build_step_history(
@@ -2517,14 +2977,47 @@ def _load_metrics(
 
 
 def _finite_metric(metrics: Mapping[str, Any], key: str) -> float | None:
-    value = metrics.get(key)
-    if isinstance(value, bool):
-        return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
+    evidence = _metric_evidence(metrics, key, maturity="partial")
+    value = evidence["value"]
+    return float(value) if evidence["validity"] == "valid" and value is not None else None
+
+
+def _metric_evidence(
+    metrics: Mapping[str, Any],
+    key: str,
+    *,
+    maturity: str,
+    observed_at_step: str | None = None,
+    source_sha256: str | None = None,
+    tool_image_digest: str | None = None,
+) -> dict[str, Any]:
+    """Normalize tool metrics without allowing sentinels into QoR or PPA."""
+
+    if maturity not in {"partial", "terminal"}:
+        raise ValueError("metric maturity is invalid")
+    raw = metrics.get(key)
+    value: float | None = None
+    validity = "valid"
+    if raw is None or isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        validity = "unavailable"
+    else:
+        parsed = float(raw)
+        if not math.isfinite(parsed) or abs(parsed) >= METRIC_SENTINEL_ABS:
+            validity = "tool_sentinel"
+        else:
+            value = parsed
+    return {
+        "schema": "lane.metric/v2",
+        "metric": key,
+        "value": value,
+        "unit": METRIC_UNITS.get(key, "count"),
+        "observed_at_step": observed_at_step,
+        "maturity": maturity,
+        "validity": validity,
+        "raw_value": None if raw is None else str(raw),
+        "source_sha256": source_sha256,
+        "tool_image_digest": tool_image_digest,
+    }
 
 
 def _physical_sanity(
@@ -2536,6 +3029,7 @@ def _physical_sanity(
     tap_area_um2: float | None,
     utilization_pct: float | None,
     utilization_metric: str,
+    minimum_geometry_qualification: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
 
@@ -2669,9 +3163,13 @@ def _physical_sanity(
                 violations.append(f"{label} area is negative")
         if core_area_um2 > 0.0:
             if total_instance_area_um2 > core_area_um2 * tolerance:
-                violations.append("total instance area exceeds core area beyond tolerance")
+                violations.append(
+                    "total instance area exceeds core area beyond tolerance"
+                )
             if standard_cell_area_um2 > core_area_um2 * tolerance:
-                violations.append("standard-cell area exceeds core area beyond tolerance")
+                violations.append(
+                    "standard-cell area exceeds core area beyond tolerance"
+                )
             if filler_area_um2 > core_area_um2 * tolerance:
                 violations.append("filler area exceeds core area beyond tolerance")
             calculated_utilization = standard_cell_area_um2 / core_area_um2 * 100.0
@@ -2687,32 +3185,84 @@ def _physical_sanity(
                     "within tolerance"
                 )
         if tap_area_um2 > standard_cell_area_um2 * tolerance:
-            violations.append("tap-cell area exceeds standard-cell area beyond tolerance")
+            violations.append(
+                "tap-cell area exceeds standard-cell area beyond tolerance"
+            )
         if filler_area_um2 > total_instance_area_um2 * tolerance:
-            violations.append("filler area exceeds total instance area beyond tolerance")
-        if standard_cell_area_um2 + filler_area_um2 > total_instance_area_um2 * tolerance:
+            violations.append(
+                "filler area exceeds total instance area beyond tolerance"
+            )
+        if (
+            standard_cell_area_um2 + filler_area_um2
+            > total_instance_area_um2 * tolerance
+        ):
             violations.append(
                 "standard-cell plus filler area exceeds total instance area beyond tolerance"
             )
         checks["area_consistency"] = {
             "status": "fail" if violations else "pass",
             "tolerance_pct": PHYSICAL_SANITY_AREA_TOLERANCE_PCT,
-            "reason": "; ".join(violations) if violations else (
+            "reason": "; ".join(violations)
+            if violations
+            else (
                 "reported core, instance, standard-cell, filler, tap, and utilization "
                 "metrics are mutually consistent"
             ),
         }
 
-    statuses = [check["status"] for check in checks.values()]
-    if "fail" in statuses:
+    density_checks = ("minimum_utilization", "maximum_filler_ratio")
+    density_statuses = [checks[name]["status"] for name in density_checks]
+    if any(status == "unknown" for status in density_statuses):
+        raw_density_gate = "unknown"
+    elif any(status == "fail" for status in density_statuses):
+        raw_density_gate = "fail"
+    else:
+        raw_density_gate = "pass"
+    qualification = dict(minimum_geometry_qualification or {
+        "gate": "not_applicable",
+        "classification": "not_applicable",
+        "reasons": [],
+        "integrity_checks": {},
+    })
+    metric_ranges_valid = (
+        utilization_pct is not None
+        and 0.0 <= utilization_pct <= 100.0
+        and filler_ratio_pct is not None
+        and 0.0 <= filler_ratio_pct <= 100.0 + PHYSICAL_SANITY_AREA_TOLERANCE_PCT
+    )
+    area_consistency_pass = checks["area_consistency"]["status"] == "pass"
+    qualification_gate = (
+        "pass"
+        if raw_density_gate == "fail"
+        and qualification.get("gate") == "pass"
+        and metric_ranges_valid
+        and area_consistency_pass
+        else qualification.get("gate", "not_applicable")
+    )
+    density = {
+        "raw_threshold_gate": raw_density_gate,
+        "classification": qualification.get("classification", "not_applicable"),
+        "qualification_gate": qualification_gate,
+        "utilization_pct": utilization_pct,
+        "filler_ratio_pct": filler_ratio_pct,
+        "qualification_reasons": list(qualification.get("reasons") or []),
+    }
+    integrity_statuses = [
+        check["status"] for name, check in checks.items() if name not in density_checks
+    ]
+    if any(status == "fail" for status in integrity_statuses):
         gate = "fail"
-    elif statuses and all(status == "pass" for status in statuses):
+    elif any(status == "unknown" for status in integrity_statuses):
+        gate = "unknown"
+    elif raw_density_gate == "pass" or qualification_gate == "pass":
         gate = "pass"
     else:
-        gate = "unknown"
+        gate = "unknown" if raw_density_gate == "unknown" else "fail"
     return {
         "gate": gate,
         "checks": checks,
+        "density": density,
+        "minimum_geometry_qualification": qualification,
         "thresholds": {
             "minimum_utilization_pct": PHYSICAL_SANITY_MIN_UTILIZATION_PCT,
             "maximum_filler_ratio_pct": PHYSICAL_SANITY_MAX_FILLER_RATIO_PCT,
@@ -2724,45 +3274,169 @@ def _physical_sanity(
     }
 
 
-def summarize_qor(metrics: dict[str, Any], metric_status: str) -> dict[str, Any]:
+def summarize_qor(
+    metrics: dict[str, Any],
+    metric_status: str,
+    *,
+    observed_at_step: str | None = None,
+    source_sha256: str | None = None,
+    tool_image_digest: str | None = None,
+    terminal_maturity: bool | None = None,
+    physical_plan: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     checks_by_metric = {
         "setup_timing": "timing__setup_vio__count",
         "hold_timing": "timing__hold_vio__count",
+        "max_slew": "design__max_slew_violation__count",
+        "max_cap": "design__max_cap_violation__count",
         "route_drc": "route__drc_errors",
         "magic_drc": "magic__drc_error__count",
         "klayout_drc": "klayout__drc_error__count",
         "lvs": "design__lvs_error__count",
         "xor": "design__xor_difference__count",
     }
-    checks: dict[str, str] = {}
+    if terminal_maturity is None:
+        terminal_maturity = metric_status == "final"
+    maturity = "terminal" if metric_status == "final" and terminal_maturity else "partial"
+    evidence_keys = {
+        *checks_by_metric.values(),
+        "timing__setup__ws",
+        "timing__setup__tns",
+        "timing__hold__ws",
+        "timing__hold__tns",
+        "design__instance__area",
+        "design__instance__area__stdcell",
+        "design__core__area",
+        "design__instance__area__class:fill_cell",
+        "design__instance__area__class:tap_cell",
+        "design__instance__utilization",
+        "design__instance__utilization__stdcell",
+        "power__total",
+    }
+    metric_evidence = {
+        key: _metric_evidence(
+            metrics,
+            key,
+            maturity=maturity,
+            observed_at_step=observed_at_step,
+            source_sha256=source_sha256,
+            tool_image_digest=tool_image_digest,
+        )
+        for key in sorted(evidence_keys)
+    }
+
+    setup_wns = metric_evidence["timing__setup__ws"]["value"]
+    setup_tns = metric_evidence["timing__setup__tns"]["value"]
+    setup_violations = metric_evidence["timing__setup_vio__count"]["value"]
+    max_slew_violations = metric_evidence[
+        "design__max_slew_violation__count"
+    ]["value"]
+    max_cap_violations = metric_evidence[
+        "design__max_cap_violation__count"
+    ]["value"]
+    corner_setup: list[dict[str, Any]] = []
+    corner_prefix = "timing__setup__ws__corner:"
+    for key, raw_wns in sorted(metrics.items()):
+        if not isinstance(key, str) or not key.startswith(corner_prefix):
+            continue
+        corner = key.removeprefix(corner_prefix)
+        wns = _finite_metric(metrics, key)
+        tns = _finite_metric(metrics, f"timing__setup__tns__corner:{corner}")
+        violations = _finite_metric(
+            metrics, f"timing__setup_vio__count__corner:{corner}"
+        )
+        if wns is None and tns is None and violations is None:
+            continue
+        corner_setup.append(
+            {
+                "corner": corner,
+                "wns_ns": wns,
+                "tns_ns": tns,
+                "violation_count": violations,
+                "status": "fail"
+                if (violations is not None and violations > 0)
+                or (wns is not None and wns < 0)
+                else "pass",
+            }
+        )
+    failing_corner_count = sum(row["status"] == "fail" for row in corner_setup)
+    failure_modes: list[str] = []
+    if setup_violations is None or setup_wns is None:
+        timing_failure_class = "timing_unavailable"
+    elif setup_violations > 0:
+        marginal = (
+            setup_wns >= -0.2
+            and setup_violations <= 1
+            and failing_corner_count <= 1
+        )
+        timing_failure_class = "timing_marginal" if marginal else "timing_structural"
+        failure_modes.append("setup_marginal" if marginal else "setup_structural")
+    elif (max_slew_violations or 0) > 0 or (max_cap_violations or 0) > 0:
+        timing_failure_class = "electrical_constraint"
+    else:
+        timing_failure_class = "pass"
+    if (max_slew_violations or 0) > 0:
+        failure_modes.append("max_slew")
+    if (max_cap_violations or 0) > 0:
+        failure_modes.append("max_capacitance")
+    if timing_failure_class == "electrical_constraint" and not failure_modes:
+        failure_modes.append("electrical_constraint")
+    timing_diagnostics = {
+        "schema": "lane.timing-diagnostic/v1",
+        "classification": timing_failure_class,
+        "failure_modes": failure_modes,
+        "setup_wns_ns": setup_wns,
+        "setup_tns_ns": setup_tns,
+        "setup_violation_count": setup_violations,
+        "failing_corner_count": failing_corner_count,
+        "corners": corner_setup,
+        "max_slew_violation_count": max_slew_violations,
+        "max_cap_violation_count": max_cap_violations,
+        "timing_repair_buffer_count": _finite_metric(
+            metrics, "design__instance__count__class:timing_repair_buffer"
+        ),
+        "route_wirelength_um": next(
+            (
+                value
+                for key in (
+                    "global_route__wirelength",
+                    "route__wirelength__estimated",
+                    "route__wirelength",
+                )
+                if (value := _finite_metric(metrics, key)) is not None
+            ),
+            None,
+        ),
+    }
+    observed_checks: dict[str, str] = {}
     for label, key in checks_by_metric.items():
-        if key not in metrics:
-            checks[label] = "unknown"
-            continue
-        value = metrics[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            checks[label] = "unknown"
-            continue
-        parsed = float(value)
-        if not math.isfinite(parsed) or parsed < 0 or not parsed.is_integer():
-            checks[label] = "unknown"
-            continue
-        checks[label] = "pass" if parsed == 0 else "fail"
+        evidence = metric_evidence[key]
+        value = evidence["value"]
+        if (
+            evidence["validity"] != "valid"
+            or value is None
+            or value < 0
+            or not value.is_integer()
+        ):
+            observed_checks[label] = "unknown"
+        else:
+            observed_checks[label] = "pass" if value == 0 else "fail"
+    checks = (
+        observed_checks
+        if maturity == "terminal"
+        else {label: "unknown" for label in checks_by_metric}
+    )
     if any(value == "fail" for value in checks.values()):
         signoff_gate = "fail"
-    elif metric_status == "final" and all(value == "pass" for value in checks.values()):
+    elif maturity == "terminal" and all(value == "pass" for value in checks.values()):
         signoff_gate = "pass"
     else:
         signoff_gate = "unknown"
 
     total_instance_area_um2 = _finite_metric(metrics, "design__instance__area")
-    standard_cell_area_um2 = _finite_metric(
-        metrics, "design__instance__area__stdcell"
-    )
+    standard_cell_area_um2 = _finite_metric(metrics, "design__instance__area__stdcell")
     core_area_um2 = _finite_metric(metrics, "design__core__area")
-    filler_area_um2 = _finite_metric(
-        metrics, "design__instance__area__class:fill_cell"
-    )
+    filler_area_um2 = _finite_metric(metrics, "design__instance__area__class:fill_cell")
     tap_area_um2 = _finite_metric(metrics, "design__instance__area__class:tap_cell")
     utilization_metric = (
         "design__instance__utilization__stdcell"
@@ -2792,6 +3466,9 @@ def summarize_qor(metrics: dict[str, Any], metric_status: str) -> dict[str, Any]
         and core_area_um2 > 0.0
         else None
     )
+    minimum_geometry_qualification = minimum_geometry_density_qualification(
+        physical_plan, metrics
+    )
     physical_sanity = _physical_sanity(
         total_instance_area_um2=total_instance_area_um2,
         standard_cell_area_um2=standard_cell_area_um2,
@@ -2800,6 +3477,7 @@ def summarize_qor(metrics: dict[str, Any], metric_status: str) -> dict[str, Any]
         tap_area_um2=tap_area_um2,
         utilization_pct=utilization_pct,
         utilization_metric=utilization_metric,
+        minimum_geometry_qualification=minimum_geometry_qualification,
     )
     if signoff_gate == "fail" or physical_sanity["gate"] == "fail":
         gate = "fail"
@@ -2813,23 +3491,37 @@ def summarize_qor(metrics: dict[str, Any], metric_status: str) -> dict[str, Any]
         for label, key in checks_by_metric.items()
         if checks[label] == "fail"
     ]
+    qualified_density = (
+        physical_sanity.get("density", {}).get("qualification_gate") == "pass"
+    )
     gate_reasons.extend(
         f"physical_sanity.{label}: {check['reason']}"
         for label, check in physical_sanity["checks"].items()
         if check["status"] == "fail"
+        and not (qualified_density and label in {"minimum_utilization", "maximum_filler_ratio"})
     )
     return {
         "status": metric_status,
+        "maturity": maturity,
         "gate": gate,
         "gate_reasons": gate_reasons,
         "signoff_gate": signoff_gate,
-        "signoff": {"gate": signoff_gate, "checks": checks},
+        "signoff": {
+            "gate": signoff_gate,
+            "checks": checks,
+            "observed_checks": observed_checks,
+        },
         "checks": checks,
+        "observed_signoff": observed_checks,
+        "metric_evidence": metric_evidence,
         "physical_sanity": physical_sanity,
-        "setup_ws_ns": metrics.get("timing__setup__ws"),
-        "setup_tns_ns": metrics.get("timing__setup__tns"),
-        "hold_ws_ns": metrics.get("timing__hold__ws"),
-        "hold_tns_ns": metrics.get("timing__hold__tns"),
+        "timing_diagnostics": timing_diagnostics,
+        "setup_ws_ns": metric_evidence["timing__setup__ws"]["value"],
+        "setup_tns_ns": metric_evidence["timing__setup__tns"]["value"],
+        "hold_ws_ns": metric_evidence["timing__hold__ws"]["value"],
+        "hold_tns_ns": metric_evidence["timing__hold__tns"]["value"],
+        "max_slew_violation_count": max_slew_violations,
+        "max_cap_violation_count": max_cap_violations,
         "logic_area_um2": logic_area_um2,
         "standard_cell_area_um2": standard_cell_area_um2,
         "core_area_um2": core_area_um2,
@@ -2839,7 +3531,9 @@ def summarize_qor(metrics: dict[str, Any], metric_status: str) -> dict[str, Any]
         "utilization_pct": utilization_pct,
         "logic_utilization_pct": logic_utilization_pct,
         "filler_ratio_pct": filler_ratio_pct,
-        "power_w": metrics.get("power__total"),
+        "power_w": metric_evidence["power__total"]["value"],
+        "design__die__bbox": metrics.get("design__die__bbox"),
+        "design__core__bbox": metrics.get("design__core__bbox"),
     }
 
 
@@ -2892,9 +3586,7 @@ def _valid_gds_stream(path: Path) -> bool:
             return False
         try:
             units_index = next(
-                index
-                for index, record in enumerate(records[3:], 3)
-                if record[0] == 3
+                index for index, record in enumerate(records[3:], 3) if record[0] == 3
             )
         except StopIteration:
             return False
@@ -2911,11 +3603,21 @@ def _valid_gds_stream(path: Path) -> bool:
                 in_structure = True
                 structure_has_name = False
             elif record_type == 6:
-                if not in_structure or structure_has_name or data_type != 6 or length < 6:
+                if (
+                    not in_structure
+                    or structure_has_name
+                    or data_type != 6
+                    or length < 6
+                ):
                     return False
                 structure_has_name = True
             elif record_type == 7:
-                if not in_structure or not structure_has_name or data_type != 0 or length != 4:
+                if (
+                    not in_structure
+                    or not structure_has_name
+                    or data_type != 0
+                    or length != 4
+                ):
                     return False
                 in_structure = False
                 completed_structures += 1
@@ -2933,7 +3635,9 @@ def discover_artifacts(
         trusted_run_dir = canonical_directory(run_dir, label="LibreLane run directory")
     except ValueError:
         trusted_run_dir = None
-    final = trusted_run_dir / "final" if trusted_run_dir is not None else run_dir / "final"
+    final = (
+        trusted_run_dir / "final" if trusted_run_dir is not None else run_dir / "final"
+    )
     gds_candidates: list[Path] = []
     if trusted_run_dir is not None:
         try:
@@ -2988,7 +3692,7 @@ def discover_artifacts(
                     maximum_size=64 * 1024 * 1024,
                 )
             )
-        except ValueError:
+        except (OSError, ValueError):
             pass
         render_dir = final / "render"
         try:
@@ -3166,9 +3870,9 @@ def _delivery_attestation(state: Mapping[str, Any]) -> dict[str, Any]:
         "pdk_integrity_sha256": state.get("pdk_integrity_sha256"),
         "last_completed_step": state.get("last_completed_step"),
         "qor_sha256": hashlib.sha256(
-            json.dumps(
-                state.get("qor"), sort_keys=True, separators=(",", ":")
-            ).encode("utf-8")
+            json.dumps(state.get("qor"), sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
         ).hexdigest(),
         "mapped_equivalence_sha256": hashlib.sha256(
             json.dumps(
@@ -3228,14 +3932,10 @@ def _terminal_release_integrity(
                 errors.append(f"terminal event journal could not be read: {exc}")
             except (KeyError, RuntimeError, TypeError, ValueError) as exc:
                 status = "degraded"
-                errors.append(
-                    f"terminal event journal is invalid: {exc}"
-                )
+                errors.append(f"terminal event journal is invalid: {exc}")
             else:
                 event_sha256 = (
-                    (terminal.get("data") or {}).get(
-                        "delivery_attestation_sha256"
-                    )
+                    (terminal.get("data") or {}).get("delivery_attestation_sha256")
                     if isinstance(terminal, Mapping)
                     else None
                 )
@@ -3261,9 +3961,8 @@ def _terminal_release_integrity(
         status = "unknown"
         errors.append(evidence_read_error)
     if status == "verified" and (
-        refreshed.get("status") != "completed" or refreshed.get(
-        "delivery_gate"
-        ) != "pass"
+        refreshed.get("status") != "completed"
+        or refreshed.get("delivery_gate") != "pass"
     ):
         status = "degraded"
         errors.extend(
@@ -3359,8 +4058,7 @@ def _flow_delivery_scope(state: Mapping[str, Any]) -> tuple[str, str | None]:
     to = state.get("to")
     resume = state.get("resume") or {}
     resume_covers_start = (
-        isinstance(resume, Mapping)
-        and resume.get("chain_verified") is True
+        isinstance(resume, Mapping) and resume.get("chain_verified") is True
     )
     pinned_root = (
         state.get("flow_registry_version") == CLASSIC_REGISTRY_VERSION
@@ -3396,12 +4094,33 @@ def _runtime_environment_attestation(
         observed_image_id = image_id(runtime_image_ref)
         observed_image_version = image_librelane_version(runtime_image_ref)
         if observed_image_id != image_digest:
-            errors.append("pinned runtime image is unavailable or has a different identity")
+            errors.append(
+                "pinned runtime image is unavailable or has a different identity"
+            )
         if observed_image_version != LIBRELANE_VERSION:
-            errors.append("pinned runtime image LibreLane version is unavailable or incompatible")
+            errors.append(
+                "pinned runtime image LibreLane version is unavailable or incompatible"
+            )
+    image_lock_snapshot = state.get("image_lock")
+    try:
+        validated_image_lock = _validate_image_lock(image_lock_snapshot)
+    except RuntimeError as exc:
+        validated_image_lock = None
+        errors.append(f"run image lock snapshot is invalid: {exc}")
+    else:
+        if (
+            validated_image_lock.get("image") != state.get("image")
+            or validated_image_lock.get("image_digest") != image_digest
+            or validated_image_lock.get("librelane_version")
+            != state.get("librelane_version")
+            or validated_image_lock.get("lock_sha256") != state.get("image_lock_sha256")
+        ):
+            errors.append("run image lock snapshot does not match the runtime identity")
     container_identity = state.get("container_identity")
     container_runtime_binding = {
-        key: container_identity.get(key) if isinstance(container_identity, Mapping) else None
+        key: container_identity.get(key)
+        if isinstance(container_identity, Mapping)
+        else None
         for key in ("image", "image_digest", "runtime_image_ref")
     }
     if (
@@ -3422,7 +4141,9 @@ def _runtime_environment_attestation(
         or preflight.get("image_digest") != image_digest
         or preflight.get("runtime_image_ref") != runtime_image_ref
     ):
-        errors.append("configuration preflight runtime image binding is missing or inconsistent")
+        errors.append(
+            "configuration preflight runtime image binding is missing or inconsistent"
+        )
 
     pdk_name = state.get("pdk")
     pdk_root_value = state.get("pdk_root")
@@ -3462,6 +4183,12 @@ def _runtime_environment_attestation(
         "image": state.get("image"),
         "image_digest": image_digest,
         "runtime_image_ref": runtime_image_ref,
+        "image_lock_sha256": state.get("image_lock_sha256"),
+        "image_lock_revision": (
+            validated_image_lock.get("revision")
+            if validated_image_lock is not None
+            else None
+        ),
         "observed_image_id": observed_image_id,
         "expected_librelane_version": state.get("librelane_version"),
         "librelane_version": observed_image_version,
@@ -3502,19 +4229,25 @@ def _delivery_status(
         identity_errors.append("run is not bound to the Classic flow")
     if state.get("flow_registry_version") != CLASSIC_REGISTRY_VERSION:
         identity_errors.append("Classic registry version is missing or incompatible")
-    if state.get("image") != LIBRELANE_IMAGE or state.get("librelane_version") != LIBRELANE_VERSION:
+    if (
+        state.get("image") != LIBRELANE_IMAGE
+        or state.get("librelane_version") != LIBRELANE_VERSION
+    ):
         identity_errors.append("run is not bound to the pinned LibreLane image/version")
-    if not isinstance(state.get("image_digest"), str) or re.fullmatch(
-        r"sha256:[0-9a-f]{64}", str(state.get("image_digest"))
-    ) is None:
+    if (
+        not isinstance(state.get("image_digest"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(state.get("image_digest"))) is None
+    ):
         identity_errors.append("run has no valid LibreLane image digest binding")
-    if not isinstance(state.get("config_sha256"), str) or re.fullmatch(
-        r"[0-9a-f]{64}", str(state.get("config_sha256"))
-    ) is None:
+    if (
+        not isinstance(state.get("config_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(state.get("config_sha256"))) is None
+    ):
         identity_errors.append("run has no valid configuration content binding")
-    if not isinstance(state.get("pdk_integrity_sha256"), str) or re.fullmatch(
-        r"[0-9a-f]{64}", str(state.get("pdk_integrity_sha256"))
-    ) is None:
+    if (
+        not isinstance(state.get("pdk_integrity_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(state.get("pdk_integrity_sha256"))) is None
+    ):
         identity_errors.append("run has no PDK content integrity binding")
     pdk_name = state.get("pdk")
     if (
@@ -3553,6 +4286,8 @@ def _delivery_status(
             and persisted_runtime.get("image_digest") == state.get("image_digest")
             and persisted_runtime.get("runtime_image_ref")
             == state.get("runtime_image_ref")
+            and persisted_runtime.get("image_lock_sha256")
+            == state.get("image_lock_sha256")
             and persisted_runtime.get("image") == state.get("image")
             and persisted_runtime.get("expected_librelane_version")
             == state.get("librelane_version")
@@ -3579,15 +4314,38 @@ def _delivery_status(
             runtime_attestation = dict(persisted_runtime)
             persisted_errors = runtime_attestation.get("errors")
             if not isinstance(persisted_errors, list):
-                persisted_errors = ["persisted runtime environment attestation is malformed"]
+                persisted_errors = [
+                    "persisted runtime environment attestation is malformed"
+                ]
             identity_errors.extend(str(error) for error in persisted_errors)
             runtime_identity_attested = (
                 runtime_attestation.get("verified") is True and not persisted_errors
             )
         else:
-            runtime_attestation, runtime_errors = _runtime_environment_attestation(state)
+            runtime_attestation, runtime_errors = _runtime_environment_attestation(
+                state
+            )
             identity_errors.extend(runtime_errors)
             runtime_identity_attested = not runtime_errors
+        identity_errors.extend(geometry_drift_errors(state.get("physical_plan"), qor))
+        physical_binding = state.get("physical_plan")
+        if physical_binding is not None:
+            try:
+                if not isinstance(physical_binding, Mapping):
+                    raise ValueError("physical plan binding is malformed")
+                plan_snapshot = load_plan(Path(str(physical_binding.get("path") or "")))
+                if (
+                    plan_snapshot.get("plan_sha256")
+                    != physical_binding.get("plan_sha256")
+                    or plan_snapshot.get("geometry_lock_sha256")
+                    != physical_binding.get("geometry_lock_sha256")
+                    or plan_snapshot.get("config_sha256") != state.get("config_sha256")
+                    or plan_snapshot.get("input_bundle_sha256")
+                    != state.get("input_bundle_sha256")
+                ):
+                    raise ValueError("physical plan snapshot binding changed")
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                identity_errors.append(f"physical plan integrity is invalid: {exc}")
     else:
         input_bundle_attested = False
         runtime_identity_attested = False
@@ -3638,9 +4396,10 @@ def _delivery_status(
             reasons.append(
                 "no structurally valid canonical GDSII stream exists under final/gds"
             )
-        if mapped_equivalence.get("requested") is True and mapped_equivalence.get(
-            "gate"
-        ) != "pass":
+        if (
+            mapped_equivalence.get("requested") is True
+            and mapped_equivalence.get("gate") != "pass"
+        ):
             reasons.extend(
                 "mapped_equivalence: " + str(reason)
                 for reason in mapped_equivalence.get("reasons", [])
@@ -3674,7 +4433,9 @@ def _delivery_status(
     }
 
 
-def _tail_lines(path: Path, count: int = 80, max_bytes: int = 2 * 1024 * 1024) -> list[str]:
+def _tail_lines(
+    path: Path, count: int = 80, max_bytes: int = 2 * 1024 * 1024
+) -> list[str]:
     if not path.is_file():
         return []
     size = path.stat().st_size
@@ -3708,7 +4469,11 @@ def _structured_failure(state: Mapping[str, Any]) -> dict[str, Any] | None:
     errors = [str(value) for value in (state.get("errors") or []) if value]
     message = str(
         state.get("status_detail")
-        or (errors[-1] if errors else "managed LibreLane run did not satisfy its terminal gate")
+        or (
+            errors[-1]
+            if errors
+            else "managed LibreLane run did not satisfy its terminal gate"
+        )
     )
     evidence = []
     for key in ("build_log", "metrics_path", "state_file"):
@@ -3760,9 +4525,8 @@ def _transition_events(
                     },
                 }
             )
-    if (
-        after.get("active_step")
-        and after.get("active_step") != before.get("active_step")
+    if after.get("active_step") and after.get("active_step") != before.get(
+        "active_step"
     ):
         active_row = next(
             (
@@ -3833,9 +4597,7 @@ def _transition_events(
                 "message": "sealed LibreLane delivery evidence changed after completion",
                 "data": {
                     "audit_id": after_integrity.get("audit_id"),
-                    "attestation_sha256": after_integrity.get(
-                        "attestation_sha256"
-                    ),
+                    "attestation_sha256": after_integrity.get("attestation_sha256"),
                     "errors": after_integrity.get("errors") or [],
                 },
                 "failure": after.get("failure"),
@@ -3913,7 +4675,8 @@ def _transition_events(
                 "phase": after.get("coarse_phase") or "terminal",
                 "status": status,
                 "severity": "error" if status in {"failed", "incomplete"} else "info",
-                "message": after.get("status_detail") or f"managed LibreLane run {status}",
+                "message": after.get("status_detail")
+                or f"managed LibreLane run {status}",
                 "data": {
                     "exit_code": after.get("exit_code"),
                     "delivery_gate": after.get("delivery_gate"),
@@ -3939,13 +4702,15 @@ def _terminal_auxiliary_projection(
     """Keep a sealed run outcome fixed while admitting late sidecar evidence."""
 
     projected = dict(persisted)
+    partial_checkpoint = persisted.get("flow_scope") == "partial"
     try:
         sealed_public_delivery = _sealed_public_delivery(persisted)
     except (KeyError, RuntimeError, TypeError, ValueError):
         sealed_public_delivery = None
-        if persisted.get("status") == "completed" or persisted.get(
-            "failure_kind"
-        ) == "release_integrity":
+        if not partial_checkpoint and (
+            persisted.get("status") == "completed"
+            or persisted.get("failure_kind") == "release_integrity"
+        ):
             projected["metrics_path"] = None
             projected["canonical_gds"] = []
             projected["qor"] = None
@@ -4010,6 +4775,12 @@ def _terminal_durable_projection(
     """Persist verdicts while retaining the immutable raw terminal snapshot."""
 
     durable = dict(projected)
+    # A deliberately bounded Classic run is a controller checkpoint, not a
+    # delivery.  It must retain its latest State so a validated child probe can
+    # resume from it.  Full deliveries still use the sealed public projection
+    # below, which prevents late filesystem changes from rewriting GDS/QoR.
+    if projected.get("flow_scope") == "partial":
+        return durable
     for key in SEALED_PUBLIC_DELIVERY_FIELDS:
         if key in INTEGRITY_DEGRADATION_FIELDS:
             continue
@@ -4022,9 +4793,7 @@ def _terminal_durable_projection(
                 else {}
             )
             if isinstance(projected_artifacts, Mapping):
-                artifacts["visualizations"] = projected_artifacts.get(
-                    "visualizations"
-                )
+                artifacts["visualizations"] = projected_artifacts.get("visualizations")
             if artifacts:
                 durable["artifacts"] = artifacts
             else:
@@ -4051,9 +4820,7 @@ def refresh_status(
             "managed run state requires state_revision and rejects legacy revision"
         )
     managed_state_revision(state)
-    audit_id = _validate_tracking_id(
-        integrity_audit_id, label="integrity audit id"
-    )
+    audit_id = _validate_tracking_id(integrity_audit_id, label="integrity audit id")
     persisted_terminal = (
         dict(state)
         if state.get("status") in TERMINAL_STATES
@@ -4095,7 +4862,44 @@ def refresh_status(
     metrics, metric_status, metric_path, metrics_read_error = _load_metrics(
         run_dir, steps
     )
-    qor = summarize_qor(metrics, metric_status)
+    metric_source_sha256 = None
+    if isinstance(metric_path, str):
+        try:
+            metric_source_sha256 = file_sha256(
+                canonical_regular_file(
+                    Path(metric_path),
+                    root=run_dir,
+                    label="QoR metrics evidence",
+                    minimum_size=1,
+                    maximum_size=64 * 1024 * 1024,
+                )
+            )
+        except (OSError, ValueError):
+            pass
+    last_completed_step = completed[-1]["id"] if completed else None
+    physical_plan_for_qor: Mapping[str, Any] | None = None
+    physical_binding = state.get("physical_plan")
+    if isinstance(physical_binding, Mapping) and isinstance(
+        physical_binding.get("path"), str
+    ):
+        try:
+            physical_plan_for_qor = load_plan(Path(str(physical_binding["path"])))
+        except (OSError, ValueError, json.JSONDecodeError):
+            # Delivery identity validation below remains the authoritative
+            # failure path; QoR qualification must fail closed without a plan.
+            physical_plan_for_qor = None
+    qor = summarize_qor(
+        metrics,
+        metric_status,
+        observed_at_step=last_completed_step,
+        source_sha256=metric_source_sha256,
+        tool_image_digest=state.get("image_digest"),
+        terminal_maturity=(
+            process_status == "completed"
+            and last_completed_step == CLASSIC_TERMINAL_STEP
+        ),
+        physical_plan=physical_plan_for_qor,
+    )
     visualization = discover_visualization(state)
     artifacts = discover_artifacts(run_dir, steps, visualization)
     if isinstance(state.get("resume"), Mapping):
@@ -4108,12 +4912,16 @@ def refresh_status(
                     "chain_verification_error": None,
                     "verified_root_run_id": chain_proof["root_run_id"],
                     "verified_chain_depth": chain_proof["chain_depth"],
-                    "verified_chain_proof_sha256": chain_proof[
-                        "chain_proof_sha256"
-                    ],
+                    "verified_chain_proof_sha256": chain_proof["chain_proof_sha256"],
                 }
             )
-        except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            json.JSONDecodeError,
+        ) as exc:
             resume_status.update(
                 {
                     "chain_verified": False,
@@ -4158,8 +4966,7 @@ def refresh_status(
         mapped_equivalence=mapped_equivalence,
     )
     delivery_failed = (
-        process_status == "completed"
-        and delivery["delivery_gate"] == "fail"
+        process_status == "completed" and delivery["delivery_gate"] == "fail"
     )
     qor_failed = delivery_failed and qor.get("gate") == "fail"
     mapped_equivalence_failed = (
@@ -4196,7 +5003,9 @@ def refresh_status(
         ]
         errors.extend(fallback[-8:])
     if delivery_failed:
-        reasons = delivery.get("delivery_gate_reasons") or ["final delivery gate failed"]
+        reasons = delivery.get("delivery_gate_reasons") or [
+            "final delivery gate failed"
+        ]
         for reason in reasons:
             prefix = "QoR" if qor_failed else "DELIVERY"
             message = f"[{prefix} ERROR] {reason}"
@@ -4255,10 +5064,12 @@ def refresh_status(
                 if process_status == "completed" and delivery["flow_scope"] == "partial"
                 else _coarse_phase(active_step)
             ),
-            "last_completed_step": completed[-1]["id"] if completed else None,
+            "last_completed_step": last_completed_step,
             "completed_step_count": len(completed),
             "started_step_count": len(steps),
-            "failed_step": incomplete[-1]["id"] if status == "failed" and incomplete else None,
+            "failed_step": incomplete[-1]["id"]
+            if status == "failed" and incomplete
+            else None,
             "metrics_path": metric_path,
             "qor": qor,
             "step_history": step_history,
@@ -4397,9 +5208,10 @@ def resume_run(
     if snapshot_errors:
         raise ValueError("; ".join(snapshot_errors))
     source_input_bundle = source.get("input_bundle_sha256")
-    if not isinstance(source_input_bundle, str) or re.fullmatch(
-        r"[0-9a-f]{64}", source_input_bundle
-    ) is None:
+    if (
+        not isinstance(source_input_bundle, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_input_bundle) is None
+    ):
         raise ValueError("resume source has no valid design input bundle identity")
     config = load_design_config(
         Path(source["config_path"]),
@@ -4407,11 +5219,7 @@ def resume_run(
         flow_override=str(source["flow"]),
     )
     image = validate_image_name(str(source["image"]))
-    current_image_digest = image_id(image)
-    if current_image_digest is None:
-        raise RuntimeError(
-            f"LibreLane image is unavailable: {image}; run lane-agent image-install"
-        )
+    current_image_digest = str(require_locked_image(image)["image_digest"])
     plan = build_resume_plan(
         source,
         config,
@@ -4450,6 +5258,73 @@ def resume_run(
     )
 
 
+def start_planning_probe(
+    source_run_id: str,
+    *,
+    plan_id: str,
+    candidate_id: str,
+    policy_sha256: str,
+    overrides: Iterable[str],
+    to: str,
+    jobs: int | None = None,
+) -> dict[str, Any]:
+    """Start one controller-owned geometry probe from a frozen synthesis baseline."""
+
+    source = reconcile_status(source_run_id)
+    if source.get("process_status") != "completed":
+        raise ValueError("physical planning baseline is not complete")
+    if source.get("last_completed_step") != "OpenROAD.STAPrePNR":
+        raise ValueError("physical planning baseline must end at OpenROAD.STAPrePNR")
+    if (
+        source.get("planning_probe") is not None
+        or source.get("physical_plan") is not None
+    ):
+        raise ValueError(
+            "physical planning baseline has an incompatible execution identity"
+        )
+    if (source.get("origin") or {}).get("component") != "physical-planner-baseline":
+        raise ValueError("physical planning baseline origin is invalid")
+    artifacts = source.get("artifacts")
+    checkpoint = (
+        artifacts.get("latest_state") if isinstance(artifacts, Mapping) else None
+    )
+    if not isinstance(checkpoint, str):
+        raise ValueError("physical planning baseline has no State checkpoint")
+    initial_state, state_sha256 = validate_initial_state(
+        Path(checkpoint), Path(str(source["design_dir"]))
+    )
+    probe = {
+        "schema_version": 1,
+        "plan_id": plan_id,
+        "candidate_id": candidate_id,
+        "policy_sha256": policy_sha256,
+        "parent_run_id": source_run_id,
+        "parent_run_dir": str(source["librelane_run_dir"]),
+        "baseline_state_sha256": state_sha256,
+    }
+    return start_run(
+        Path(str(source["config_path"])),
+        pdk=str(source["pdk"]),
+        flow=str(source["flow"]),
+        pdk_root=Path(str(source["pdk_root"])),
+        overrides=overrides,
+        frm="OpenROAD.Floorplan",
+        to=to,
+        jobs=jobs if jobs is not None else source.get("jobs"),
+        image=str(source["image"]),
+        initial_state=initial_state,
+        initial_state_sha256=state_sha256,
+        parent_run_id=source_run_id,
+        workflow_id=plan_id,
+        attempt_id=candidate_id,
+        origin="physical-planner-probe",
+        expected_input_bundle_sha256=str(source["input_bundle_sha256"]),
+        planning_probe=probe,
+        visualization_enabled=False,
+        claim_current=False,
+    )
+
+
 @_serialized_start
 def start_visualization(
     run_id: str | None = None, *, retry_failed: bool = False
@@ -4471,7 +5346,9 @@ def start_visualization(
         )
 
     if state.get("flow_registry_version") != CLASSIC_REGISTRY_VERSION:
-        raise RuntimeError("visualization requires the pinned Classic registry identity")
+        raise RuntimeError(
+            "visualization requires the pinned Classic registry identity"
+        )
     validate_image_name(str(state.get("image") or ""))
     runtime_image_ref = validate_runtime_image_ref(
         str(state.get("runtime_image_ref") or state.get("image_digest") or "")
@@ -4499,9 +5376,7 @@ def start_visualization(
     if (
         not pdk_report.get("ready")
         or pdk_report.get("tree_sha256") != state.get("pdk_integrity_sha256")
-        or installed_pdk_revision(
-            str(state["pdk"]), Path(str(state["pdk_root"]))
-        )
+        or installed_pdk_revision(str(state["pdk"]), Path(str(state["pdk_root"])))
         != state.get("pdk_revision")
     ):
         raise RuntimeError("visualization PDK identity changed since the run started")
@@ -4600,7 +5475,14 @@ def list_runs(
             if active_only and state.get("status") not in ACTIVE_STATES:
                 continue
             states.append(state)
-        except (OSError, RuntimeError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        except (
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            json.JSONDecodeError,
+        ):
             continue
     return states[:limit]
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -37,6 +39,14 @@ from .controller import (
     tail_logs,
 )
 from .run_state import STATE_ROOT, load_state
+from .physical_planner import (
+    export_planning_geometry,
+    list_planning_states,
+    load_planning_state,
+    start_physical_planning,
+    stop_physical_planning,
+)
+from .physical_plan import calibrate_policy, canonical_sha256, load_policy
 
 
 def doctor_report(
@@ -131,8 +141,115 @@ def cmd_start(args: argparse.Namespace) -> int:
         attempt_id=args.attempt_id,
         idempotency_key=args.idempotency_key,
         origin=args.origin,
+        physical_plan_path=args.physical_plan,
     )
     print(json.dumps(state, indent=2) if args.json else format_status(state))
+    return 0
+
+
+def cmd_plan_start(args: argparse.Namespace) -> int:
+    state = start_physical_planning(
+        Path(args.config),
+        policy_path=args.policy,
+        pdk_root=args.pdk_root,
+        image=args.image,
+        jobs=args.jobs,
+        geometry_lock_path=args.geometry_lock,
+        idempotency_key=args.idempotency_key,
+        final_workflow_id=args.final_workflow_id,
+        final_attempt_id=args.final_attempt_id,
+        final_idempotency_key=args.final_idempotency_key,
+        final_to=args.final_to,
+    )
+    print(json.dumps(state, indent=2) if args.json else _format_plan_status(state))
+    return 0
+
+
+def _format_plan_status(state: dict[str, object]) -> str:
+    lines = [
+        f"Physical plan {state.get('plan_id')}: {state.get('status')}",
+        f"phase: {state.get('phase')}",
+        f"mode: {state.get('mode')}",
+        f"baseline Lane run: {state.get('baseline_lane_run_id') or '-'}",
+        f"active Lane run: {state.get('active_lane_run_id') or '-'}",
+        f"Lane Step: {state.get('lane_active_step') or state.get('lane_last_completed_step') or '-'}",
+        f"candidates: {state.get('completed_candidate_count', 0)}/{state.get('candidate_count', 0)}",
+        f"physical plan: {state.get('physical_plan_path') or '-'}",
+        f"publishable: {state.get('publishable') if state.get('publishable') is not None else '-'}",
+    ]
+    error = state.get("error")
+    if isinstance(error, dict):
+        lines.append(f"error: {error.get('code')}: {error.get('message')}")
+    return "\n".join(lines)
+
+
+def cmd_plan_status(args: argparse.Namespace) -> int:
+    state = load_planning_state(args.plan_id)
+    print(json.dumps(state, indent=2) if args.json else _format_plan_status(state))
+    return 1 if state["status"] == "failed" else 0
+
+
+def cmd_plan_list(args: argparse.Namespace) -> int:
+    rows = list_planning_states(limit=args.limit)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        for row in rows:
+            print(f"{row['plan_id']}  {row['status']:<9}  {row['phase']}")
+    return 0
+
+
+def cmd_plan_stop(args: argparse.Namespace) -> int:
+    state = stop_physical_planning(args.plan_id)
+    print(json.dumps(state, indent=2) if args.json else _format_plan_status(state))
+    return 0
+
+
+def cmd_plan_geometry(args: argparse.Namespace) -> int:
+    document = export_planning_geometry(args.plan_id)
+    encoded = json.dumps(document, indent=2, sort_keys=True) + "\n"
+    if args.output is not None:
+        output = args.output.expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = output.with_name(output.name + ".tmp")
+        temporary.write_text(encoded, encoding="ascii")
+        temporary.chmod(0o400)
+        temporary.replace(output)
+    print(json.dumps(document, indent=2))
+    return 0
+
+
+def cmd_plan_calibrate(args: argparse.Namespace) -> int:
+    evidence_path = args.evidence.expanduser().resolve(strict=True)
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if not isinstance(evidence, dict):
+        raise ValueError("physical planning calibration evidence must be an object")
+    policy = calibrate_policy(
+        load_policy(args.bootstrap), evidence, policy_id=args.policy_id
+    )
+    output = args.output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = output.with_name(output.name + ".tmp")
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o400
+    )
+    with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+        stream.write(json.dumps(policy, indent=2, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(output)
+    print(
+        json.dumps(
+            {
+                "output": str(output),
+                "policy_id": policy["policy_id"],
+                "policy_sha256": canonical_sha256(policy),
+                "file_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                "publishable": True,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -334,8 +451,68 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--attempt-id")
     start.add_argument("--idempotency-key")
     start.add_argument("--origin", default="lane-agent")
+    start.add_argument(
+        "--physical-plan",
+        type=Path,
+        help="completed frozen physical-plan.json bound to this exact design input",
+    )
     start.add_argument("--json", action="store_true")
     start.set_defaults(func=cmd_start)
+
+    plan_start = commands.add_parser(
+        "plan-start", help="Start tool-driven physical planning in the background"
+    )
+    plan_start.add_argument("--config", required=True)
+    plan_start.add_argument("--policy", type=Path)
+    plan_start.add_argument("--pdk-root", type=Path, default=PDK_ROOT)
+    plan_start.add_argument("--image", default=IMAGE)
+    plan_start.add_argument("--jobs", type=int)
+    plan_start.add_argument(
+        "--geometry-lock",
+        type=Path,
+        help="exported Human geometry lock that must be reused and re-probed",
+    )
+    plan_start.add_argument("--idempotency-key")
+    plan_start.add_argument("--json", action="store_true")
+    plan_start.add_argument("--final-workflow-id")
+    plan_start.add_argument("--final-attempt-id")
+    plan_start.add_argument("--final-idempotency-key")
+    plan_start.add_argument("--final-to")
+    plan_start.set_defaults(func=cmd_plan_start)
+
+    plan_status = commands.add_parser(
+        "plan-status", help="Show one physical planning status snapshot"
+    )
+    plan_status.add_argument("--plan-id")
+    plan_status.add_argument("--json", action="store_true")
+    plan_status.set_defaults(func=cmd_plan_status)
+
+    plan_list = commands.add_parser("plan-list", help="List physical planning runs")
+    plan_list.add_argument("--limit", type=int, default=100)
+    plan_list.add_argument("--json", action="store_true")
+    plan_list.set_defaults(func=cmd_plan_list)
+
+    plan_stop = commands.add_parser("plan-stop", help="Stop physical planning and its active probe")
+    plan_stop.add_argument("--plan-id")
+    plan_stop.add_argument("--json", action="store_true")
+    plan_stop.set_defaults(func=cmd_plan_stop)
+
+    plan_geometry = commands.add_parser(
+        "plan-geometry", help="Export a completed plan's geometry-only lock"
+    )
+    plan_geometry.add_argument("--plan-id")
+    plan_geometry.add_argument("--output", type=Path)
+    plan_geometry.set_defaults(func=cmd_plan_geometry)
+
+    plan_calibrate = commands.add_parser(
+        "plan-calibrate",
+        help="Calibrate a publishable planning policy from Human evidence",
+    )
+    plan_calibrate.add_argument("--evidence", type=Path, required=True)
+    plan_calibrate.add_argument("--bootstrap", type=Path)
+    plan_calibrate.add_argument("--policy-id", required=True)
+    plan_calibrate.add_argument("--output", type=Path, required=True)
+    plan_calibrate.set_defaults(func=cmd_plan_calibrate)
 
     resume = commands.add_parser(
         "resume", help="Create a new Classic run from a validated prior State"

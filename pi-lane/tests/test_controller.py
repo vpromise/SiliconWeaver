@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -11,9 +12,14 @@ from unittest.mock import patch
 from pi_lane.config import capture_design_inputs, load_design_config, validate_override
 from pi_lane.controller import (
     PDK_REVISIONS,
+    _physical_sanity,
+    _image_lock_digest,
+    _record_image_lock,
     _eqy_runtime_inputs,
     _expected_eqy_gate_tcl,
     _expected_eqy_script,
+    _terminal_auxiliary_projection,
+    _terminal_durable_projection,
     _idempotent_run,
     _install_errors,
     _materialize_design_snapshot,
@@ -27,6 +33,7 @@ from pi_lane.controller import (
     discover_steps,
     discover_visualization,
     installed_pdk_revision,
+    load_image_lock,
     list_runs,
     pdk_installed,
     pdk_integrity_report,
@@ -34,9 +41,11 @@ from pi_lane.controller import (
     pdk_proxy_environment,
     pdk_proxy_uses_loopback,
     refresh_image_install,
+    image_install_status,
     refresh_pdk_install,
     refresh_status,
     reconcile_status,
+    require_locked_image,
     run_event_report,
     stop_image_install,
     stop_pdk_install,
@@ -72,10 +81,20 @@ def complete_metrics(
     tap_area: float,
     utilization: float,
     setup_violations: int = 0,
+    setup_wns: float = 0.0,
+    setup_tns: float = 0.0,
+    max_slew_violations: int = 0,
+    max_cap_violations: int = 0,
 ) -> dict[str, float | int]:
     return {
         "timing__setup_vio__count": setup_violations,
+        "timing__setup__ws": setup_wns,
+        "timing__setup__tns": setup_tns,
         "timing__hold_vio__count": 0,
+        "timing__hold__ws": 0.0,
+        "timing__hold__tns": 0.0,
+        "design__max_slew_violation__count": max_slew_violations,
+        "design__max_cap_violation__count": max_cap_violations,
         "route__drc_errors": 0,
         "magic__drc_error__count": 0,
         "klayout__drc_error__count": 0,
@@ -113,6 +132,22 @@ def write_valid_gds(path: Path) -> None:
     path.write_bytes(b"".join(records))
 
 
+def locked_image_identity(digest: str | None = None) -> dict[str, object]:
+    digest = digest or "sha256:" + "d" * 64
+    record: dict[str, object] = {
+        "schema_version": 1,
+        "revision": 1,
+        "image": LIBRELANE_IMAGE,
+        "image_digest": digest,
+        "librelane_version": LIBRELANE_VERSION,
+        "install_run_id": "image-install-1",
+        "locked_at": "2026-08-05T00:00:00+08:00",
+        "previous_lock_sha256": None,
+    }
+    record["lock_sha256"] = _image_lock_digest(record)
+    return {**record, "lock_path": "/state/image-installs/image-lock.json"}
+
+
 def completed_run_state(root: Path, *, to: str | None = None) -> dict[str, object]:
     config_path = root / "config.yaml"
     config_path.write_text("DESIGN_NAME: delivery_test\nPDK: sky130A\n")
@@ -140,6 +175,7 @@ def completed_run_state(root: Path, *, to: str | None = None) -> dict[str, objec
         "image_digest": image_digest,
         "runtime_image_ref": image_digest,
     }
+    image_lock = locked_image_identity(image_digest)
     return {
         "schema_version": 6,
         "state_revision": 0,
@@ -173,11 +209,18 @@ def completed_run_state(root: Path, *, to: str | None = None) -> dict[str, objec
         "image": LIBRELANE_IMAGE,
         "image_digest": image_digest,
         "runtime_image_ref": image_digest,
+        "image_lock": {
+            key: value for key, value in image_lock.items() if key != "lock_path"
+        },
+        "image_lock_path": image_lock["lock_path"],
+        "image_lock_sha256": image_lock["lock_sha256"],
         "librelane_version": LIBRELANE_VERSION,
         "container_identity": runtime_binding,
         "config_preflight": runtime_binding,
         "runtime_environment_attestation": {
             **runtime_binding,
+            "image_lock_sha256": image_lock["lock_sha256"],
+            "image_lock_revision": image_lock["revision"],
             "expected_librelane_version": LIBRELANE_VERSION,
             "container_runtime_binding": runtime_binding,
             "preflight_runtime_binding": runtime_binding,
@@ -201,7 +244,9 @@ def recapture_run_inputs(state: dict[str, object]) -> None:
     controller_dir = Path(str(state["controller_dir"]))
     snapshot = controller_dir / f"input-snapshot-{manifest['bundle_sha256'][:12]}"
     _materialize_design_snapshot(snapshot, manifest=manifest, captured=captured)
-    manifest_path = controller_dir / f"input-manifest-{manifest['bundle_sha256'][:12]}.json"
+    manifest_path = (
+        controller_dir / f"input-manifest-{manifest['bundle_sha256'][:12]}.json"
+    )
     manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     state.update(
         {
@@ -214,7 +259,9 @@ def recapture_run_inputs(state: dict[str, object]) -> None:
     )
 
 
-def seal_completed_delivery(root: Path) -> tuple[dict[str, object], Path, Path]:
+def seal_completed_delivery(
+    root: Path,
+) -> tuple[dict[str, object], Path, Path]:
     state = completed_run_state(root)
     state["status"] = "running"
     run_dir = Path(str(state["librelane_run_dir"]))
@@ -332,11 +379,13 @@ class PiLaneTests(unittest.TestCase):
             }
             state_file.write_text(json.dumps(image_state), encoding="utf-8")
             before = state_file.read_bytes()
-            with patch("pi_lane.controller.pid_identity_alive", return_value=False), patch(
-                "pi_lane.controller.image_id", return_value="sha256:image"
-            ), patch(
-                "pi_lane.controller.image_librelane_version",
-                return_value=LIBRELANE_VERSION,
+            with (
+                patch("pi_lane.controller.pid_identity_alive", return_value=False),
+                patch("pi_lane.controller.image_id", return_value="sha256:image"),
+                patch(
+                    "pi_lane.controller.image_librelane_version",
+                    return_value=LIBRELANE_VERSION,
+                ),
             ):
                 image = refresh_image_install(image_state)
             self.assertEqual(state_file.read_bytes(), before)
@@ -352,9 +401,12 @@ class PiLaneTests(unittest.TestCase):
             }
             state_file.write_text(json.dumps(pdk_state), encoding="utf-8")
             before = state_file.read_bytes()
-            with patch("pi_lane.controller.pid_identity_alive", return_value=False), patch(
-                "pi_lane.controller.pdk_integrity_report",
-                return_value={"ready": True},
+            with (
+                patch("pi_lane.controller.pid_identity_alive", return_value=False),
+                patch(
+                    "pi_lane.controller.pdk_integrity_report",
+                    return_value={"ready": True},
+                ),
             ):
                 pdk = refresh_pdk_install(pdk_state)
             self.assertEqual(state_file.read_bytes(), before)
@@ -479,6 +531,7 @@ class PiLaneTests(unittest.TestCase):
         self.assertNotIn("event", step_events[0])
         self.assertEqual(step_events[0]["step"], "Misc.ReportManufacturability")
         self.assertEqual(step_events[0]["ordinal"], 80)
+
 
     def test_completed_delivery_degrades_after_same_size_valid_gds_replacement(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -757,8 +810,8 @@ class PiLaneTests(unittest.TestCase):
             'PDK="gf180mcuD"',
             'VERILOG_FILES=["/tmp/evil.v"]',
             'SDC_FILE="/tmp/evil.sdc"',
-            'RUN_EQY=false',
-            'ERROR_ON_LINTER_ERRORS=false',
+            "RUN_EQY=false",
+            "ERROR_ON_LINTER_ERRORS=false",
             'FLOW="Other"',
         ):
             with self.subTest(protected=protected), self.assertRaises(ValueError):
@@ -773,7 +826,7 @@ class PiLaneTests(unittest.TestCase):
             command, _ = build_docker_command(
                 config,
                 run_id="run",
-                tag="tag",
+                tag="PI_LANE_run",
                 pdk_root=root / "pdk",
                 overrides=[],
                 frm=None,
@@ -793,7 +846,13 @@ class PiLaneTests(unittest.TestCase):
             command,
         )
         self.assertIn(f"{root / 'snapshot'}:{root}:ro", command)
-        self.assertIn(f"{root / 'runs'}:{root / 'runs'}:rw", command)
+        self.assertIn(
+            f"{root / 'runs' / 'PI_LANE_run'}:{root / 'runs' / 'PI_LANE_run'}:rw",
+            command,
+        )
+        self.assertNotIn(f"{root / 'runs'}:{root / 'runs'}:rw", command)
+
+
 
     def test_design_inputs_are_captured_once_and_attested(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -818,9 +877,7 @@ class PiLaneTests(unittest.TestCase):
             controller = root / "controller"
             controller.mkdir()
             snapshot = controller / "input-snapshot"
-            _materialize_design_snapshot(
-                snapshot, manifest=manifest, captured=captured
-            )
+            _materialize_design_snapshot(snapshot, manifest=manifest, captured=captured)
             manifest_path = controller / "input-manifest.json"
             manifest_path.write_text(json.dumps(manifest))
             state = {
@@ -837,15 +894,16 @@ class PiLaneTests(unittest.TestCase):
             self.assertIn("changed", "\n".join(_verify_design_snapshot(state)))
 
     def test_design_input_capture_rejects_files_outside_design_directory(self):
-        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as other:
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            tempfile.TemporaryDirectory() as other,
+        ):
             root = Path(temp)
             external = Path(other) / "external.v"
             external.write_text("module external; endmodule\n")
             config_path = root / "config.yaml"
             config_path.write_text(
-                "DESIGN_NAME: demo\n"
-                "PDK: sky130A\n"
-                f"VERILOG_FILES: [{external}]\n"
+                f"DESIGN_NAME: demo\nPDK: sky130A\nVERILOG_FILES: [{external}]\n"
             )
             with self.assertRaisesRegex(ValueError, "inside the design directory"):
                 capture_design_inputs(load_design_config(config_path))
@@ -892,7 +950,7 @@ class PiLaneTests(unittest.TestCase):
             command, _ = build_docker_command(
                 config,
                 run_id="run",
-                tag="tag",
+                tag="PI_LANE_run",
                 pdk_root=root / "pdk",
                 overrides=[],
                 frm=None,
@@ -907,9 +965,26 @@ class PiLaneTests(unittest.TestCase):
             self.assertIn(
                 f"{materialized_tool}:/root/.nix-profile/bin/make:ro", command
             )
-            self.assertIn(
-                f"{materialized_tool}:/root/.nix-profile/bin/awk:ro", command
-            )
+            self.assertIn(f"{materialized_tool}:/root/.nix-profile/bin/awk:ro", command)
+
+    def test_docker_command_rejects_a_noncanonical_run_mount_tag(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config_path = root / "config.yaml"
+            config_path.write_text("DESIGN_NAME: demo\nPDK: sky130A\n")
+            config = load_design_config(config_path)
+            with self.assertRaisesRegex(ValueError, "exact PI_LANE"):
+                build_docker_command(
+                    config,
+                    run_id="run",
+                    tag="../../runs",
+                    pdk_root=root / "pdk",
+                    overrides=[],
+                    frm=None,
+                    to=None,
+                    jobs=None,
+                    runtime_image_ref="sha256:" + "d" * 64,
+                )
 
     def test_materialized_eqy_tool_never_replaces_an_existing_path(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -950,9 +1025,17 @@ class PiLaneTests(unittest.TestCase):
             with (
                 patch("pi_lane.controller.STATE_ROOT", state_root),
                 patch("pi_lane.controller.make_run_id", return_value="wired-run"),
+                patch(
+                    "pi_lane.controller.require_locked_image",
+                    return_value=locked_image_identity(),
+                ),
                 patch("pi_lane.controller.image_id", return_value="sha256:" + "d" * 64),
-                patch("pi_lane.controller.image_librelane_version", return_value="3.0.5"),
-                patch("pi_lane.controller.installed_pdk_revision", return_value="b" * 40),
+                patch(
+                    "pi_lane.controller.image_librelane_version", return_value="3.0.5"
+                ),
+                patch(
+                    "pi_lane.controller.installed_pdk_revision", return_value="b" * 40
+                ),
                 patch(
                     "pi_lane.controller.pdk_integrity_report",
                     return_value={
@@ -981,7 +1064,9 @@ class PiLaneTests(unittest.TestCase):
                     return_value=(5678, 1357),
                 ),
                 patch("pi_lane.controller.set_current"),
-                patch("pi_lane.controller.refresh_status", side_effect=lambda state: state),
+                patch(
+                    "pi_lane.controller.refresh_status", side_effect=lambda state: state
+                ),
                 patch(
                     "pi_lane.controller.build_visualizer_command",
                     wraps=build_visualizer_command,
@@ -1032,6 +1117,10 @@ class PiLaneTests(unittest.TestCase):
                 patch("pi_lane.run_state.STATE_ROOT", state_root),
                 patch(
                     "pi_lane.controller.make_run_id", return_value="registration-race"
+                ),
+                patch(
+                    "pi_lane.controller.require_locked_image",
+                    return_value=locked_image_identity(),
                 ),
                 patch("pi_lane.controller.image_id", return_value="sha256:" + "d" * 64),
                 patch(
@@ -1088,7 +1177,13 @@ class PiLaneTests(unittest.TestCase):
             state_root = root / "state"
             with (
                 patch("pi_lane.controller.STATE_ROOT", state_root),
-                patch("pi_lane.controller.make_run_id", return_value="identity-failure"),
+                patch(
+                    "pi_lane.controller.make_run_id", return_value="identity-failure"
+                ),
+                patch(
+                    "pi_lane.controller.require_locked_image",
+                    return_value=locked_image_identity(),
+                ),
                 patch(
                     "pi_lane.controller.image_id",
                     return_value="sha256:" + "d" * 64,
@@ -1136,9 +1231,7 @@ class PiLaneTests(unittest.TestCase):
                 )
             )
             self.assertEqual(failed["status"], "failed")
-            self.assertEqual(
-                failed["failure"]["code"], "LANE_WORKER_IDENTITY_FAILED"
-            )
+            self.assertEqual(failed["failure"]["code"], "LANE_WORKER_IDENTITY_FAILED")
 
     def test_start_run_rejects_non_classic_flow_before_runtime_checks(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1149,16 +1242,16 @@ class PiLaneTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "only the pinned.*Classic"):
                 start_run(config_path)
 
-    def test_start_run_rejects_a_changed_resume_input_bundle_before_runtime_checks(self):
+    def test_start_run_rejects_a_changed_resume_input_bundle_before_runtime_checks(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             rtl = root / "demo.sv"
             rtl.write_text("module demo; endmodule\n", encoding="utf-8")
             config_path = root / "config.yaml"
             config_path.write_text(
-                "DESIGN_NAME: demo\n"
-                "PDK: sky130A\n"
-                "VERILOG_FILES: [dir::demo.sv]\n",
+                "DESIGN_NAME: demo\nPDK: sky130A\nVERILOG_FILES: [dir::demo.sv]\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "design inputs changed"):
@@ -1180,8 +1273,27 @@ class PiLaneTests(unittest.TestCase):
         self.assertEqual(found[0]["id"], "OpenROAD.Floorplan")
         self.assertTrue(found[0]["completed"])
 
+    def test_step_discovery_preserves_repeated_classic_step_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp)
+            step = run / "31-openroad-stamidpnr-3"
+            step.mkdir()
+            # LibreLane's metadata intentionally omits SequentialFlow's
+            # normalized duplicate suffix, so the directory is authoritative
+            # for known Classic registry identities.
+            (step / "config.json").write_text(
+                json.dumps({"meta": {"step": "OpenROAD.STAMidPNR"}})
+            )
+            (step / "state_out.json").write_text("{}")
+            found = discover_steps(run)
+        self.assertEqual(found[0]["id"], "OpenROAD.STAMidPNR-3")
+        self.assertTrue(found[0]["completed"])
+
     def test_step_discovery_rejects_symlinked_steps_and_state(self):
-        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as other:
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            tempfile.TemporaryDirectory() as other,
+        ):
             run = Path(temp)
             external_step = Path(other) / "01-external"
             external_step.mkdir()
@@ -1250,8 +1362,7 @@ class PiLaneTests(unittest.TestCase):
         )
         self.assertIn(f"{root / 'snapshot'}:/pi-lane/design:ro", command)
         self.assertIn(
-            f"{root / 'design' / 'runs' / 'run'}:"
-            f"{root / 'design' / 'runs' / 'run'}:ro",
+            f"{root / 'design' / 'runs' / 'run'}:{root / 'design' / 'runs' / 'run'}:ro",
             command,
         )
         self.assertIn(
@@ -1341,7 +1452,11 @@ class PiLaneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             command, _ = build_pdk_install_command(
-                "sky130A", pdk_root=root, run_id="run", proxy_env={}
+                "sky130A",
+                pdk_root=root,
+                run_id="run",
+                runtime_image_ref="sha256:" + "d" * 64,
+                proxy_env={},
             )
             self.assertIn(PDK_REVISIONS["sky130A"][1], command)
             self.assertIn(f"{root}:{root}:rw", command)
@@ -1391,9 +1506,7 @@ class PiLaneTests(unittest.TestCase):
                 "pi_lane.controller._pdk_tree_digest",
                 side_effect=AssertionError("status polling must not hash the PDK tree"),
             ):
-                cached = pdk_integrity_report(
-                    "sky130A", root, verify_content=False
-                )
+                cached = pdk_integrity_report("sky130A", root, verify_content=False)
             self.assertTrue(cached["ready"])
             self.assertFalse(cached["content_verified"])
 
@@ -1459,6 +1572,113 @@ class PiLaneTests(unittest.TestCase):
             self.assertEqual(failed["exit_code"], 125)
             self.assertIn("start time is unavailable", failed["errors"][0])
 
+    def test_image_lock_is_tofu_pinned_and_replacement_requires_exact_digest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp) / "image-installs"
+            first_digest = "sha256:" + "a" * 64
+            second_digest = "sha256:" + "b" * 64
+            first_state = {
+                "status": "completed",
+                "run_id": "image-install-1",
+                "image": LIBRELANE_IMAGE,
+                "image_digest": first_digest,
+                "expected_digest": None,
+                "replace_lock": False,
+            }
+            with (
+                patch("pi_lane.controller.IMAGE_INSTALL_ROOT", install_root),
+                patch("pi_lane.controller.image_id", return_value=first_digest),
+                patch(
+                    "pi_lane.controller.image_librelane_version",
+                    return_value=LIBRELANE_VERSION,
+                ),
+            ):
+                first = _record_image_lock(first_state)
+                self.assertEqual(load_image_lock(), first)
+                self.assertEqual(require_locked_image()["image_digest"], first_digest)
+
+            replacement = {
+                **first_state,
+                "run_id": "image-install-2",
+                "image_digest": second_digest,
+            }
+            with (
+                patch("pi_lane.controller.IMAGE_INSTALL_ROOT", install_root),
+                patch("pi_lane.controller.image_id", return_value=second_digest),
+                patch(
+                    "pi_lane.controller.image_librelane_version",
+                    return_value=LIBRELANE_VERSION,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "persistent lock"):
+                    _record_image_lock(replacement)
+                with self.assertRaisesRegex(
+                    RuntimeError, "differs from the persistent"
+                ):
+                    require_locked_image()
+
+                replacement.update(
+                    {"replace_lock": True, "expected_digest": second_digest}
+                )
+                second = _record_image_lock(replacement)
+                self.assertEqual(second["revision"], 2)
+                self.assertEqual(second["previous_lock_sha256"], first["lock_sha256"])
+                self.assertEqual(load_image_lock(), second)
+
+    def test_image_lock_missing_and_ambiguous_replacement_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp) / "image-installs"
+            with patch("pi_lane.controller.IMAGE_INSTALL_ROOT", install_root):
+                with self.assertRaisesRegex(RuntimeError, "not locked"):
+                    require_locked_image()
+            with self.assertRaisesRegex(ValueError, "requires --expected-digest"):
+                start_image_install(replace_lock=True)
+
+    def test_completed_image_status_persists_the_image_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp) / "image-installs"
+            run_dir = install_root / "image-install-1"
+            run_dir.mkdir(parents=True)
+            digest = "sha256:" + "a" * 64
+            exit_file = run_dir / "exit_code"
+            exit_file.write_text("0\n", encoding="ascii")
+            build_log = run_dir / "install.log"
+            build_log.write_text("completed\n", encoding="utf-8")
+            state = {
+                "kind": "image_install",
+                "run_id": "image-install-1",
+                "state_file": str(run_dir / "state.json"),
+                "build_log": str(build_log),
+                "exit_file": str(exit_file),
+                "pid": 999999,
+                "pid_start_time": 1,
+                "status": "completed",
+                "installation_attested": True,
+                "image": LIBRELANE_IMAGE,
+                "image_digest": digest,
+                "librelane_version": LIBRELANE_VERSION,
+                "started_epoch": 1.0,
+                "stop_requested": False,
+            }
+            Path(state["state_file"]).write_text(json.dumps(state), encoding="utf-8")
+            with (
+                patch("pi_lane.controller.IMAGE_INSTALL_ROOT", install_root),
+                patch(
+                    "pi_lane.controller.IMAGE_INSTALL_CURRENT", install_root / "current"
+                ),
+                patch("pi_lane.controller.image_id", return_value=digest),
+                patch(
+                    "pi_lane.controller.image_librelane_version",
+                    return_value=LIBRELANE_VERSION,
+                ),
+                patch("pi_lane.controller.pid_identity_alive", return_value=False),
+            ):
+                persisted = image_install_status("image-install-1")
+                lock = load_image_lock(required=True)
+
+            self.assertTrue(persisted["image_lock_attested"])
+            self.assertEqual(lock["image_digest"], digest)
+
     def test_pdk_installer_registration_failure_terminates_process_and_container(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1473,6 +1693,10 @@ class PiLaneTests(unittest.TestCase):
                 patch(
                     "pi_lane.controller._managed_install_id",
                     return_value="pdk-install",
+                ),
+                patch(
+                    "pi_lane.controller.require_locked_image",
+                    return_value=locked_image_identity(),
                 ),
                 patch(
                     "pi_lane.controller.image_id",
@@ -1649,7 +1873,10 @@ class PiLaneTests(unittest.TestCase):
             self.assertTrue(pdk_installed("sky130A", root))
 
     def test_pdk_symlink_must_remain_inside_dedicated_root(self):
-        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as other:
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            tempfile.TemporaryDirectory() as other,
+        ):
             root = Path(temp)
             external = Path(other)
             marker = external / "libs.tech" / "openlane" / "config.tcl"
@@ -1666,7 +1893,11 @@ class PiLaneTests(unittest.TestCase):
             "NO_PROXY": "localhost,127.0.0.0/8,::1",
         }
         command, _ = build_pdk_install_command(
-            "sky130A", pdk_root=Path("/tmp/pdk"), run_id="run", proxy_env=proxy
+            "sky130A",
+            pdk_root=Path("/tmp/pdk"),
+            run_id="run",
+            runtime_image_ref="sha256:" + "d" * 64,
+            proxy_env=proxy,
         )
         self.assertTrue(pdk_proxy_uses_loopback(proxy))
         self.assertIn("host", command)
@@ -1682,7 +1913,11 @@ class PiLaneTests(unittest.TestCase):
     def test_remote_proxy_keeps_pdk_installer_on_bridge(self):
         proxy = {"HTTPS_PROXY": "http://proxy.example:8080"}
         command, _ = build_pdk_install_command(
-            "sky130A", pdk_root=Path("/tmp/pdk"), run_id="run", proxy_env=proxy
+            "sky130A",
+            pdk_root=Path("/tmp/pdk"),
+            run_id="run",
+            runtime_image_ref="sha256:" + "d" * 64,
+            proxy_env=proxy,
         )
         self.assertFalse(pdk_proxy_uses_loopback(proxy))
         self.assertNotIn("--network", command)
@@ -1705,6 +1940,45 @@ class PiLaneTests(unittest.TestCase):
             with self.subTest(value=value):
                 result = summarize_qor({"route__drc_errors": value}, "final")
                 self.assertEqual(result["checks"]["route_drc"], "unknown")
+
+    def test_partial_metrics_never_claim_terminal_signoff(self):
+        metrics = complete_metrics(
+            core_area=1000.0,
+            total_area=1000.0,
+            standard_cell_area=400.0,
+            filler_area=600.0,
+            tap_area=20.0,
+            utilization=0.4,
+        )
+        result = summarize_qor(
+            metrics,
+            "partial",
+            observed_at_step="OpenROAD.DetailedPlacement",
+            terminal_maturity=False,
+        )
+        self.assertEqual(result["maturity"], "partial")
+        self.assertEqual(result["observed_signoff"]["route_drc"], "pass")
+        self.assertEqual(result["checks"]["route_drc"], "unknown")
+        self.assertEqual(result["signoff_gate"], "unknown")
+
+    def test_tool_sentinel_metric_is_excluded_from_qor_value(self):
+        result = summarize_qor(
+            {
+                "timing__setup__ws": 1e39,
+                "power__total": float("inf"),
+            },
+            "partial",
+        )
+        self.assertIsNone(result["setup_ws_ns"])
+        self.assertIsNone(result["power_w"])
+        self.assertEqual(
+            result["metric_evidence"]["timing__setup__ws"]["validity"],
+            "tool_sentinel",
+        )
+        self.assertEqual(
+            result["metric_evidence"]["power__total"]["validity"],
+            "tool_sentinel",
+        )
 
     def test_qor_reports_real_areas_and_rejects_sparse_floorplan(self):
         summary = summarize_qor(
@@ -1745,6 +2019,33 @@ class PiLaneTests(unittest.TestCase):
             any("minimum_utilization" in reason for reason in summary["gate_reasons"])
         )
 
+    def test_proven_minimum_geometry_qualifies_only_raw_density_failures(self):
+        result = _physical_sanity(
+            total_instance_area_um2=66333.6,
+            standard_cell_area_um2=3462.07,
+            core_area_um2=66333.6,
+            filler_area_um2=62871.5,
+            tap_area_um2=1201.15,
+            utilization_pct=5.21918,
+            utilization_metric="design__instance__utilization__stdcell",
+            minimum_geometry_qualification={
+                "gate": "pass",
+                "classification": "minimum_geometry_dominated",
+                "reasons": ["sealed minimum candidate"],
+                "integrity_checks": {
+                    "plan": "pass",
+                    "search": "pass",
+                    "geometry": "pass",
+                },
+            },
+        )
+        self.assertEqual(result["gate"], "pass")
+        self.assertEqual(result["density"]["raw_threshold_gate"], "fail")
+        self.assertEqual(result["density"]["qualification_gate"], "pass")
+        self.assertEqual(
+            result["checks"]["minimum_utilization"]["status"], "fail"
+        )
+
     def test_compact_design_passes_signoff_and_physical_sanity(self):
         summary = summarize_qor(
             complete_metrics(
@@ -1772,6 +2073,10 @@ class PiLaneTests(unittest.TestCase):
                 tap_area=1201.15,
                 utilization=0.253037,
                 setup_violations=48,
+                setup_wns=-2.1,
+                setup_tns=-7.9,
+                max_slew_violations=41,
+                max_cap_violations=5,
             ),
             "final",
         )
@@ -1780,6 +2085,47 @@ class PiLaneTests(unittest.TestCase):
         self.assertEqual(summary["gate"], "fail")
         self.assertTrue(
             any("signoff.setup_timing" in reason for reason in summary["gate_reasons"])
+        )
+        self.assertEqual(
+            summary["timing_diagnostics"]["classification"], "timing_structural"
+        )
+        self.assertEqual(summary["max_slew_violation_count"], 41)
+        self.assertEqual(summary["max_cap_violation_count"], 5)
+
+    def test_marginal_timing_and_electrical_failures_are_distinguished(self):
+        marginal = complete_metrics(
+            core_area=1000.0,
+            total_area=1000.0,
+            standard_cell_area=400.0,
+            filler_area=600.0,
+            tap_area=20.0,
+            utilization=0.4,
+            setup_violations=1,
+            setup_wns=-0.1016,
+            setup_tns=-0.1016,
+        )
+        marginal["timing__setup__ws__corner:max_ss"] = -0.1016
+        marginal["timing__setup__tns__corner:max_ss"] = -0.1016
+        marginal["timing__setup_vio__count__corner:max_ss"] = 1
+        marginal_summary = summarize_qor(marginal, "final")
+        self.assertEqual(
+            marginal_summary["timing_diagnostics"]["classification"],
+            "timing_marginal",
+        )
+        electrical = complete_metrics(
+            core_area=1000.0,
+            total_area=1000.0,
+            standard_cell_area=400.0,
+            filler_area=600.0,
+            tap_area=20.0,
+            utilization=0.4,
+            max_slew_violations=2,
+        )
+        electrical_summary = summarize_qor(electrical, "final")
+        self.assertEqual(electrical_summary["checks"]["max_slew"], "fail")
+        self.assertEqual(
+            electrical_summary["timing_diagnostics"]["classification"],
+            "electrical_constraint",
         )
 
     def test_full_delivery_requires_endpoint_nonempty_gds_and_qor_pass(self):
@@ -1867,7 +2213,9 @@ class PiLaneTests(unittest.TestCase):
             }
             with (
                 patch("pi_lane.controller._verify_design_snapshot", return_value=[]),
-                patch("pi_lane.controller.image_id", return_value=digest) as image_id_mock,
+                patch(
+                    "pi_lane.controller.image_id", return_value=digest
+                ) as image_id_mock,
                 patch(
                     "pi_lane.controller.image_librelane_version",
                     return_value=LIBRELANE_VERSION,
@@ -1884,9 +2232,7 @@ class PiLaneTests(unittest.TestCase):
                 accepted = refresh_status(state)
             self.assertEqual(accepted["delivery_gate"], "pass")
             self.assertTrue(accepted["runtime_identity_attested"])
-            self.assertTrue(
-                accepted["runtime_environment_attestation"]["verified"]
-            )
+            self.assertTrue(accepted["runtime_environment_attestation"]["verified"])
             image_id_mock.assert_called_once_with(digest)
             image_version_mock.assert_called_once_with(digest)
             pdk_report_mock.assert_called_once_with(
@@ -1993,7 +2339,10 @@ class PiLaneTests(unittest.TestCase):
         self.assertEqual(refreshed["delivery_gate"], "incomplete")
         self.assertEqual(refreshed["status"], "incomplete")
         self.assertTrue(
-            any("QoR gate is unknown" in reason for reason in refreshed["delivery_gate_reasons"])
+            any(
+                "QoR gate is unknown" in reason
+                for reason in refreshed["delivery_gate_reasons"]
+            )
         )
 
     def test_full_delivery_rejects_missing_endpoint_and_empty_gds(self):
@@ -2043,6 +2392,51 @@ class PiLaneTests(unittest.TestCase):
         self.assertEqual(refreshed["delivery_gate"], "not_applicable")
         self.assertEqual(refreshed["status"], "completed")
         self.assertIn("partial", refreshed["status_detail"])
+
+    def test_partial_terminal_checkpoint_retains_latest_state(self):
+        checkpoint = "/design/runs/PI_LANE_partial/12-openroad-staprepnr/state_out.json"
+        projected = {
+            "status": "completed",
+            "flow_scope": "partial",
+            "artifacts": {
+                "latest_state": checkpoint,
+                "visualizations": {"latest": None},
+            },
+        }
+        durable = _terminal_durable_projection({}, projected)
+        self.assertEqual(durable["artifacts"]["latest_state"], checkpoint)
+
+        reconciled = _terminal_auxiliary_projection(
+            durable,
+            {
+                "artifacts": {"visualizations": {"latest": "new.png"}},
+                "visualization": {"status": "completed"},
+            },
+        )
+        self.assertEqual(reconciled["artifacts"]["latest_state"], checkpoint)
+        self.assertEqual(reconciled["artifacts"]["visualizations"]["latest"], "new.png")
+
+    def test_design_snapshot_can_create_parent_probe_mountpoint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            snapshot = root / "snapshot"
+            content = b"DESIGN_NAME: demo\nPDK: sky130A\n"
+            _materialize_design_snapshot(
+                snapshot,
+                manifest={
+                    "files": [
+                        {
+                            "path": "config.yaml",
+                            "sha256": hashlib.sha256(content).hexdigest(),
+                        }
+                    ]
+                },
+                captured={"config.yaml": content},
+                run_tag="PI_LANE_probe",
+                extra_run_tags=("PI_LANE_baseline",),
+            )
+            self.assertTrue((snapshot / "runs" / "PI_LANE_baseline").is_dir())
+            self.assertTrue((snapshot / "runs" / "PI_LANE_probe").is_dir())
 
     def test_validated_resume_chain_can_complete_a_full_delivery(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2107,9 +2501,7 @@ class PiLaneTests(unittest.TestCase):
             state["run_eqy_requested"] = True
             script = root / "eqy" / "delivery_test.eqy"
             script.parent.mkdir()
-            script.write_text(
-                _expected_eqy_script("delivery_test"), encoding="utf-8"
-            )
+            script.write_text(_expected_eqy_script("delivery_test"), encoding="utf-8")
             gate_tcl = script.with_name("delivery_test-gate.tcl")
             gate_tcl.write_text(_expected_eqy_gate_tcl(), encoding="utf-8")
             script_sha256 = file_sha256(script)
@@ -2206,7 +2598,9 @@ class PiLaneTests(unittest.TestCase):
         self.assertEqual(refreshed["failure_kind"], "qor")
         self.assertEqual(refreshed["coarse_phase"], "qor_gate")
         self.assertEqual(refreshed["qor"]["gate"], "fail")
-        self.assertTrue(any(error.startswith("[QoR ERROR]") for error in refreshed["errors"]))
+        self.assertTrue(
+            any(error.startswith("[QoR ERROR]") for error in refreshed["errors"])
+        )
 
     def test_state_ids_and_shared_pdk_root_are_rejected(self):
         with self.assertRaises(RuntimeError):
@@ -2244,7 +2638,10 @@ class PiLaneTests(unittest.TestCase):
                 validate_image_name(image)
 
     def test_malformed_and_symlinked_gds_and_metrics_are_not_delivery_evidence(self):
-        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as other:
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            tempfile.TemporaryDirectory() as other,
+        ):
             run = Path(temp) / "run"
             final = run / "final"
             gds_dir = final / "gds"
@@ -2256,14 +2653,18 @@ class PiLaneTests(unittest.TestCase):
             write_valid_gds(outside_gds)
             (gds_dir / "linked.gds").symlink_to(outside_gds)
             outside_metrics = Path(other) / "metrics.json"
-            outside_metrics.write_text(json.dumps(complete_metrics(
-                core_area=1000.0,
-                total_area=1000.0,
-                standard_cell_area=400.0,
-                filler_area=600.0,
-                tap_area=20.0,
-                utilization=0.4,
-            )))
+            outside_metrics.write_text(
+                json.dumps(
+                    complete_metrics(
+                        core_area=1000.0,
+                        total_area=1000.0,
+                        standard_cell_area=400.0,
+                        filler_area=600.0,
+                        tap_area=20.0,
+                        utilization=0.4,
+                    )
+                )
+            )
             (final / "metrics.json").symlink_to(outside_metrics)
             artifacts = discover_artifacts(run, [], {})
             self.assertEqual(artifacts["canonical_gds"], [])
@@ -2285,7 +2686,9 @@ class PiLaneTests(unittest.TestCase):
             with patch("pi_lane.controller._visualizer_pid_alive", return_value=False):
                 result = discover_visualization(state)
             self.assertEqual(result["status"], "failed")
-            self.assertTrue(any("terminal manifest" in item for item in result["errors"]))
+            self.assertTrue(
+                any("terminal manifest" in item for item in result["errors"])
+            )
 
     def test_visualization_manifest_schema_two_is_explicitly_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2326,7 +2729,9 @@ class PiLaneTests(unittest.TestCase):
             state["visualizer_launch_attempted"] = True
             failed = discover_visualization(state)
             self.assertEqual(failed["status"], "failed")
-            self.assertTrue(any("terminal manifest" in item for item in failed["errors"]))
+            self.assertTrue(
+                any("terminal manifest" in item for item in failed["errors"])
+            )
 
     def test_malformed_visualization_counter_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2397,7 +2802,9 @@ class PiLaneTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["completed_step_count"], 0)
-        self.assertTrue(any("non-negative integer" in item for item in result["errors"]))
+        self.assertTrue(
+            any("non-negative integer" in item for item in result["errors"])
+        )
 
     def test_install_errors_are_extracted_from_log(self):
         with tempfile.TemporaryDirectory() as temp:

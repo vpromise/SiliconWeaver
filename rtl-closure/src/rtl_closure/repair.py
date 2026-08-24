@@ -601,7 +601,7 @@ def _evaluate(
             )
             inconclusive = (
                 formal_mode == "required"
-                and formal_status in {"unknown", "error"}
+                and formal_status in {"unknown", "error", "unsupported"}
             ) or (
                 lint_enabled and lint_status in {"unknown", "error"}
             )
@@ -634,7 +634,8 @@ def _evaluate(
         lint_status = (result.get("verilator_lint") or {}).get("status")
         lint_inconclusive = lint_enabled and lint_status in {"unknown", "error"}
         formal_inconclusive = (
-            formal_mode == "required" and provider_status in {"unknown", "error"}
+            formal_mode == "required"
+            and provider_status in {"unknown", "error", "unsupported"}
         )
         if lint_inconclusive or formal_inconclusive:
             provider = (

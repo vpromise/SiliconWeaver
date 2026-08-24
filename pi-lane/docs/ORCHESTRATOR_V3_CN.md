@@ -1,6 +1,6 @@
 # Pi-Lane 全局编排器 v3
 
-> 适用版本：Pi-Lane 0.5.1。Unix socket wire protocol 固定为 3，SQLite
+> 适用版本：Pi-Lane 0.6.0。Unix socket wire protocol 固定为 3，SQLite
 > database schema 固定为 5，Lane monitor checkpoint 固定为 6。响应外壳的
 > `schema_version: 1` 是消息结构版本，不是 wire protocol 或数据库版本。
 
@@ -37,7 +37,7 @@ flowchart LR
 
 ## 2. Current-Only 格式
 
-Pi-Lane 0.5.1 只接受下列当前格式：
+Pi-Lane 0.6.0 只接受下列当前格式：
 
 | 边界 | 格式 |
 |---|---|

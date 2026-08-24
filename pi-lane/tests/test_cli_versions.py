@@ -16,7 +16,7 @@ class CliVersionTests(unittest.TestCase):
             parser.parse_args(["--version"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(output.getvalue(), f"{command} 0.5.1\n")
+        self.assertEqual(output.getvalue(), f"{command} 0.6.0\n")
 
     def test_public_commands_report_distribution_version(self) -> None:
         for builder, command in (

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
 from rtl_closure.contract import content_hash
 from rtl_closure.errors import ContainerInfrastructureError
+from rtl_closure.logic_value import from_binary, from_integer
 from rtl_closure.sandbox import (
     SANDBOX_IMAGE,
     _evaluate_architecture_netlists,
@@ -31,6 +34,24 @@ def docker_ready() -> bool:
 
 
 class SandboxContainerTests(unittest.TestCase):
+    @staticmethod
+    def _reset_preparation() -> dict:
+        return {
+            "schema_version": 1,
+            "interfaces": {
+                "gold": {
+                    "inputs": {"clk": 1, "rst_n": 1},
+                    "outputs": {"result": 4},
+                    "observable_input_dependency": {"clk": True, "rst_n": True},
+                },
+                "gate": {
+                    "inputs": {"clk": 1, "rst_n": 1},
+                    "outputs": {"result": 4},
+                    "observable_input_dependency": {"clk": True, "rst_n": True},
+                },
+            },
+        }
+
     def test_cross_verify_retains_complete_replayable_counterexample(self):
         reference = """module demo(
   input logic clk,
@@ -62,8 +83,38 @@ endmodule
         self.assertEqual(result["mismatched"], stimuli_count)
         self.assertEqual(len(result["mismatches"]), stimuli_count)
         self.assertEqual(len(result["stimuli"]), stimuli_count)
-        self.assertEqual(result["verilog_trace"], sv_trace)
-        self.assertEqual(result["python_trace"], py_trace)
+        self.assertEqual(
+            result["verilog_trace"],
+            [{"y": from_integer(0, 1)} for _ in range(stimuli_count)],
+        )
+        self.assertEqual(
+            result["python_trace"],
+            [{"y": from_integer(1, 1)} for _ in range(stimuli_count)],
+        )
+
+    def test_cross_verify_preserves_unknown_and_high_impedance_values(self):
+        reference = "module demo(input logic a, output logic y); endmodule"
+        with patch(
+            "rtl_closure.sandbox.simulate_verilog",
+            return_value=([{"y": from_binary("z", 1)}], None),
+        ), patch(
+            "rtl_closure.sandbox.simulate_python",
+            return_value=([{"y": None}], None),
+        ):
+            result = contract_cross_verify(
+                reference,
+                reference,
+                "class TopModule: pass",
+                clock_port=None,
+                reset=None,
+                num_tests=1,
+                seed=17,
+            )
+
+        self.assertEqual(result["transcript_schema_version"], 2)
+        self.assertEqual(result["mismatched"], 1)
+        self.assertEqual(result["verilog_trace"][0]["y"], from_binary("z", 1))
+        self.assertEqual(result["python_trace"][0]["y"], from_integer(None, 1))
 
     def test_top_normalizers_ignore_comments_and_preserve_preceding_helpers(self):
         rtl = """// This module top_module is the requested design.
@@ -289,7 +340,13 @@ endmodule"""
         reset = {"port": "rst_n", "active_low": True, "asynchronous": True}
         with patch(
             "rtl_closure.sandbox._prepare_observable_equivalence",
-            return_value=(["state"], 4, ["result"], "preparation"),
+            return_value=(
+                ["state"],
+                4,
+                ["result"],
+                "preparation",
+                self._reset_preparation(),
+            ),
         ), patch("rtl_closure.sandbox._run_container", return_value=completed) as run:
             report, _ = run_synthesis_equivalence(
                 "module demo; endmodule",
@@ -310,7 +367,23 @@ endmodule"""
         self.assertIn("-set-at 10 rst_n 1", script)
         self.assertIn("-prove-skip 2 -prove-asserts", script)
 
-    def test_synthesis_equivalence_rejects_failed_proof(self):
+    def test_synthesis_equivalence_rejects_reset_schedule_without_miter_port(self):
+        reset = {"port": "rst_n", "active_low": True, "asynchronous": False}
+        preparation = self._reset_preparation()
+        preparation["interfaces"]["gate"]["inputs"].pop("rst_n")
+        with patch(
+            "rtl_closure.sandbox._prepare_observable_equivalence",
+            return_value=(["state"], 4, ["result"], "preparation", preparation),
+        ), patch("rtl_closure.sandbox._run_container") as run:
+            report, _ = run_synthesis_equivalence(
+                "module demo; endmodule", "demo", clock_port="clk", reset=reset
+            )
+
+        self.assertEqual(report["status"], "inconclusive")
+        self.assertEqual(report["reason_code"], "reset_or_clock_port_missing_from_miter")
+        run.assert_not_called()
+
+    def test_synthesis_equivalence_failed_proof_is_inconclusive_without_cex(self):
         completed = subprocess.CompletedProcess(
             args=[], returncode=1, stdout="", stderr="unproven equivalence cell"
         )
@@ -318,8 +391,48 @@ endmodule"""
             "rtl_closure.sandbox._prepare_observable_equivalence",
             return_value=([], 1, ["y"], "preparation"),
         ), patch("rtl_closure.sandbox._run_container", return_value=completed):
-            with self.assertRaisesRegex(RuntimeError, "equivalence failed"):
-                run_synthesis_equivalence("module demo; endmodule", "demo")
+            report, _ = run_synthesis_equivalence("module demo; endmodule", "demo")
+        self.assertEqual(report["status"], "inconclusive")
+        self.assertEqual(
+            report["reason_code"],
+            "equivalence_proof_failed_without_replayable_counterexample",
+        )
+        self.assertIn("replay_script", report["proof_evidence"])
+
+    def test_synthesis_equivalence_captures_replayable_miter_counterexample(self):
+        def run(command, _timeout, *, purpose):
+            if purpose == "synth-equiv-cex":
+                mount = command[command.index("-v") + 1]
+                work = Path(mount.rsplit(":/work:", 1)[0])
+                (work / "equivalence-cex.json").write_text(
+                    json.dumps({"signal": "equiv_counterexample"}), encoding="utf-8"
+                )
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=1,
+                    stdout="SAT model found",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="unproven equivalence cell",
+                stderr="",
+            )
+
+        with patch(
+            "rtl_closure.sandbox._prepare_observable_equivalence",
+            return_value=([], 1, ["y"], "preparation"),
+        ), patch("rtl_closure.sandbox._run_container", side_effect=run):
+            report, _ = run_synthesis_equivalence("module demo; endmodule", "demo")
+        self.assertEqual(report["status"], "counterexample")
+        self.assertEqual(report["verdict"], "counterexample")
+        self.assertEqual(
+            report["counterexample"]["replay_status"], "miter_observable_mismatch"
+        )
+        self.assertEqual(
+            report["counterexample"]["artifact"], {"signal": "equiv_counterexample"}
+        )
 
     def test_observable_equivalence_records_outputs_and_support_names(self):
         ports = {

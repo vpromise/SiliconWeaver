@@ -9,7 +9,7 @@ workspace/
   rtl-closure/
 ```
 
-Pi-Lane 0.5.x is paired with RTL-Closure 0.6.x, Pi 0.84.1, and LibreLane 3.0.5.
+Pi-Lane 0.6.x is paired with RTL-Closure 0.7.x, Pi 0.84.2, and LibreLane 3.0.5.
 The Python environment should use Python 3.12 so both packages share one
 interpreter.
 

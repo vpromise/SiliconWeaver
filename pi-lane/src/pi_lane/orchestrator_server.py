@@ -35,7 +35,6 @@ from .orchestrator import (
     classify_backend_failure,
     ensure_private_directory,
     error_envelope,
-    file_sha256,
     now_iso,
     parse_json_stdout,
     rtl_closure_runtime_config_fingerprint,
@@ -44,6 +43,7 @@ from .orchestrator import (
     success_envelope,
     unix_socket_endpoint_state,
 )
+from .integrity import file_sha256
 
 
 MAX_REQUEST_BYTES = 1024 * 1024

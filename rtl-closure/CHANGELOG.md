@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.6.1 - Unreleased
+## 0.7.0 - Unreleased
+
+- add explicit `off`, `auto_safe`, and `reference_locked` physical-planning
+  modes, content-bound policy/geometry inputs, durable planning status, and a
+  fail-closed final Lane handoff;
+- preserve independent differential evidence as canonical four-state values in
+  transcript schema 2 instead of collapsing unknown or high-impedance bits;
+- fail closed when required bounded-formal replay cannot bind resetless initial
+  state;
+- strengthen mapped-equivalence source, snapshot, Step, verdict, and run
+  identity attestations;
+- classify physical-planning failures as non-RTL-repairable.
+
+## 0.6.1 - Initial public snapshot
 
 - define and package the Agent-only open-source scope;
 - remove comparison cases from the distribution;

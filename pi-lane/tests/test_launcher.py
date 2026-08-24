@@ -29,7 +29,7 @@ class LauncherTests(unittest.TestCase):
             ):
                 self.assertEqual(launcher.main(), 0)
 
-            output.assert_called_once_with("pi-lane 0.5.1")
+            output.assert_called_once_with("pi-lane 0.6.0")
             which.assert_not_called()
             run.assert_not_called()
             execute.assert_not_called()
@@ -173,8 +173,15 @@ class LauncherTests(unittest.TestCase):
             self.assertNotIn("RTL_CLOSURE_MODEL", pi_environment)
             self.assertNotIn("RTL_CLOSURE_BASE_URL", pi_environment)
             self.assertNotIn("RTL_CLOSURE_API_KEY", pi_environment)
-            self.assertIn(str(resources / "extensions" / "lane-monitor.ts"), arguments)
+            self.assertIn(
+                str((resources / "extensions" / "lane-monitor.ts").resolve()),
+                arguments,
+            )
             self.assertIn(str(resources / "prompts" / "LIBRELANE_AGENT.md"), arguments)
+            self.assertIn("--no-prompt-templates", arguments)
+            self.assertIn("--no-themes", arguments)
+            tools_index = arguments.index("--tools")
+            self.assertEqual(arguments[tools_index + 1], "read,bash,edit,write")
             self.assertEqual(arguments[-1], "--print")
             self.assertEqual(
                 (state / "pi-lane" / "agent").stat().st_mode & 0o777, 0o700

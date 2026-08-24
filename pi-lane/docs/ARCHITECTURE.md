@@ -9,7 +9,8 @@ flowchart LR
     U[User] --> P[Pi Agent profile]
     P --> O[Pi-Lane orchestrator]
     O --> R[RTL-Closure]
-    R --> L[lane-agent]
+    R --> PP[Optional physical planner]
+    PP --> L[lane-agent]
     L --> F[LibreLane Classic]
     R --> RA[Verified RTL bundle]
     F --> LA[GDS and QoR bundle]
@@ -25,7 +26,7 @@ flowchart LR
 | Pi profile | intent conversation and explicit confirmation | RTL or Flow state |
 | `pi-lanectl` | workflow identity, durable operations, leases, projections | child artifacts |
 | RTL-Closure | frozen spec, oracle quorum, RTL generation and verification | physical implementation |
-| `lane-agent` | immutable physical input, LibreLane run, QoR and GDS integrity | RTL generation |
+| `lane-agent` | immutable physical input, optional planning probes, LibreLane run, QoR and GDS integrity | RTL generation |
 | `lane-monitor` | bounded read-only presentation and cursors | workflow mutation |
 
 The orchestrator never discovers a child from global "latest" state. It binds
@@ -40,9 +41,12 @@ can be diagnosed directly with that bound ID.
 3. `pi-lanectl start` durably records the request before dispatching it.
 4. RTL-Closure freezes behavioral evidence, generates candidates, repairs
    failures, and publishes only after every required release gate passes.
-5. RTL-Closure hands the immutable published design to `lane-agent`.
-6. `lane-agent` runs the pinned LibreLane Classic flow with an open PDK.
-7. Reconciliation validates terminal identities and artifacts before Pi-Lane
+5. If the confirmed specification opts in, RTL-Closure starts an evidence-bound
+   physical plan and waits for its final idempotent Lane handoff.
+6. Otherwise RTL-Closure hands the immutable published design directly to
+   `lane-agent`.
+7. `lane-agent` runs the pinned LibreLane Classic flow with an open PDK.
+8. Reconciliation validates terminal identities and artifacts before Pi-Lane
    reports completion.
 
 The durable event journals are authoritative for state transitions. Monitor
@@ -56,6 +60,8 @@ truth.
 - Generated RTL and verification code run in no-network containers with pinned
   image identities.
 - Physical input files are captured into an immutable snapshot before the Flow.
+- Physical planning defaults to `off`; a bootstrap policy is non-publishable
+  until complete Human calibration evidence is supplied.
 - Only reviewed open PDK identifiers are accepted.
 - A passing run is open-source tool evidence, not commercial foundry signoff.
 

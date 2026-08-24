@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.5.1 - Unreleased
+## 0.6.0 - Unreleased
+
+- add a durable, tool-driven physical planner with sealed candidate domains,
+  bounded geometry probes, schema-v2 plans and policies, geometry locks, and an
+  explicit final Lane handoff;
+- bind managed runs to immutable LibreLane image-lock history and strengthen
+  runtime, input, process, QoR, mapped-equivalence, GDS, and delivery evidence;
+- keep the public bootstrap planning policy non-publishable until complete
+  Human reference calibration is supplied explicitly;
+- harden orchestrator and monitor identity/error projections without adding
+  private evaluation or benchmark state;
+- update the pinned Pi coding agent and Pi TUI to 0.84.2.
+
+## 0.5.1 - Initial public snapshot
 
 - define and package the Agent-only open-source scope;
 - remove benchmark datasets, baseline RTL, and comparison-only resources;

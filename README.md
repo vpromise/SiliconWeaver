@@ -45,6 +45,10 @@ SiliconWeaver treats generation as the beginning of the workflow:
 - **Physical runs are managed.** Long LibreLane jobs execute in the background
   with durable identities, resumable state, QoR extraction, artifacts, and
   integrity attestations.
+- **Physical planning is explicit and evidence-bound.** Optional tool-driven
+  planning probes a sealed geometry candidate set before the final Lane run;
+  the public default remains `off` and the bundled bootstrap policy is not
+  publishable calibration evidence.
 - **Read and write operations are separated.** Status and report commands are
   pure reads; mutations such as start, stop, retry, or reconcile are explicit.
 
@@ -58,7 +62,8 @@ flowchart LR
     O --> R["RTL-Closure"]
     R --> V["Oracle quorum, simulation, formal, lint, synthesis and repair gates"]
     V --> B["Read-only RTL publication bundle"]
-    B --> L["lane-agent"]
+    B --> F["Optional fail-closed physical planning"]
+    F --> L["lane-agent"]
     L --> C["LibreLane 3.0.5 Classic Flow"]
     C --> E["GDS, QoR, reports, hashes and attestations"]
     O -. "bounded status and durable events" .-> P
@@ -70,8 +75,8 @@ The repository contains two independently versioned Python distributions:
 
 | Component | Current version | Responsibility |
 |---|---:|---|
-| [`pi-lane/`](pi-lane/) | 0.5.1 | Pi profile, interactive launch, durable orchestration, managed LibreLane runs, QoR and artifact integrity, monitor UI |
-| [`rtl-closure/`](rtl-closure/) | 0.6.1 | Specification validation, oracle quorum, RTL generation, verification, bounded repair, publication, and Lane handoff |
+| [`pi-lane/`](pi-lane/) | 0.6.0 | Pi profile, interactive launch, durable orchestration, evidence-bound physical planning, managed LibreLane runs, QoR and artifact integrity, monitor UI |
+| [`rtl-closure/`](rtl-closure/) | 0.7.0 | Specification validation, oracle quorum, RTL generation, four-state verification, bounded repair, publication, planning selection, and Lane handoff |
 
 They share a runtime environment but keep their commands, state roots, run
 identities, releases, and artifacts distinct.
@@ -105,9 +110,9 @@ The tested compatibility set is:
 
 | Layer | Version |
 |---|---:|
-| Pi-Lane | 0.5.1 |
-| RTL-Closure | 0.6.1 |
-| Pi coding agent | 0.84.1 |
+| Pi-Lane | 0.6.0 |
+| RTL-Closure | 0.7.0 |
+| Pi coding agent | 0.84.2 |
 | LibreLane | 3.0.5 |
 | Python | 3.12 |
 | Node.js | 24 |

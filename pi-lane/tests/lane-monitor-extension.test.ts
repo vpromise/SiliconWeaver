@@ -879,6 +879,7 @@ test("automatic terminal workflow watch is restored from a session checkpoint", 
 
 test("monitor binds an RTL-Closure child by explicit run ID and checkpoints Lane events", async () => {
 	const handlers = new Map<string, (...args: any[]) => any>();
+	const commands = new Map<string, { handler: (...args: any[]) => Promise<void> }>();
 	const calls: Array<{ command: string; args: string[] }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	const notices: string[] = [];
@@ -888,7 +889,9 @@ test("monitor binds an RTL-Closure child by explicit run ID and checkpoints Lane
 			handlers.set(event, handler);
 		},
 		registerEntryRenderer() {},
-		registerCommand() {},
+		registerCommand(name: string, command: { handler: (...args: any[]) => Promise<void> }) {
+			commands.set(name, command);
+		},
 		appendEntry(customType: string, data: unknown) {
 			entries.push({ customType, data });
 		},
@@ -1003,7 +1006,12 @@ test("monitor binds an RTL-Closure child by explicit run ID and checkpoints Lane
 
 	laneMonitor(pi as any);
 	await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, context);
-	await waitFor(() => entries.some((entry) => entry.customType === "pi-lane-monitor-checkpoint"));
+	await waitFor(() => calls.some((call) => call.command === "lane-agent"
+		&& call.args[0] === "pdk-status"));
+	assert.equal(calls.some((call) => call.command === "rtl-closure"), false);
+	await commands.get("lane-monitor")?.handler("follow rtl_closure rtl-1", context);
+	await waitFor(() => calls.some((call) => call.command === "lane-agent"
+		&& call.args[0] === "status" && call.args.includes("lane-1")));
 	await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
 
 	const laneCalls = calls.filter((call) => call.command === "lane-agent");
@@ -1016,11 +1024,12 @@ test("monitor binds an RTL-Closure child by explicit run ID and checkpoints Lane
 	);
 	assert.equal(entries.some((entry) => entry.customType === "pi-lane-step"), false);
 	const checkpoint = entries.findLast((entry) => entry.customType === "pi-lane-monitor-checkpoint");
-	assert.deepEqual((checkpoint?.data as any).bindings, {});
-	assert.deepEqual((checkpoint?.data as any).pinnedSources, []);
+	assert.deepEqual((checkpoint?.data as any).bindings, { rtl_closure: "rtl-1" });
+	assert.deepEqual((checkpoint?.data as any).pinnedSources, ["rtl_closure"]);
 	assert.equal((checkpoint?.data as any).laneEventCursors["lane-1"].afterSequence, 2);
 	assert.equal((checkpoint?.data as any).laneEventCursors["lane-1"].suppressHistory, false);
 	assert.equal(notices.some((notice) => notice.includes("Step started")), false);
+	assert.ok(notices.some((notice) => notice.includes("now follows rtl_closure:rtl-1")));
 });
 
 test("a Lane child that appears after live workflow attachment reports its existing events", async () => {
@@ -1231,19 +1240,17 @@ test("session replacement aborts an old poll and blocks stale notifications", as
 	await waitFor(() => firstSignal !== undefined);
 	await handlers.get("session_start")?.({ type: "session_start", reason: "reload" }, newContext);
 	assert.equal(firstSignal?.aborted, true);
-	await waitFor(() => calls >= 5);
+	await waitFor(() => calls >= 4);
 	await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, newContext);
 	assert.deepEqual(oldNotices, []);
 });
 
-test("automatic discovery attaches an active run and releases it after completion", async () => {
+test("automatic discovery ignores orphaned standalone RTL-Closure runs", async () => {
 	const handlers = new Map<string, (...args: any[]) => any>();
 	const commands = new Map<string, { handler: (...args: any[]) => Promise<void> }>();
 	const calls: Array<{ command: string; args: string[] }> = [];
 	const statuses: Array<string | undefined> = [];
 	const widgets: unknown[] = [];
-	let reportCalls = 0;
-	let chipListCalls = 0;
 	const workflowList = JSON.stringify({
 		schema_version: 1,
 		protocol_version: 3,
@@ -1265,33 +1272,16 @@ test("automatic discovery attaches an active run and releases it after completio
 				return { stdout: workflowList, stderr: "", code: 0, killed: false };
 			}
 			if (command === "rtl-closure" && args[0] === "list") {
-				chipListCalls += 1;
 				return {
-					stdout: JSON.stringify(chipListCalls === 1
-						? [{ run_id: "rtl-auto", status: "running", phase: "generating" }]
-						: []),
+					stdout: JSON.stringify([{
+						run_id: "rtl-orphan",
+						status: "created",
+						phase: "worker_launching",
+					}]),
 					stderr: "",
 					code: 0,
 					killed: false,
 				};
-			}
-			if (command === "rtl-closure" && args[0] === "report") {
-				reportCalls += 1;
-				const completed = reportCalls >= 2;
-				return {
-					stdout: JSON.stringify({
-						run_id: "rtl-auto",
-						status: completed ? "completed" : "running",
-						phase: completed ? "completed" : "generating",
-						events: [],
-					}),
-					stderr: "",
-					code: 0,
-					killed: false,
-				};
-			}
-			if (args[0] === "list") {
-				return { stdout: "[]", stderr: "", code: 0, killed: false };
 			}
 			return {
 				stdout: "",
@@ -1314,25 +1304,24 @@ test("automatic discovery attaches an active run and releases it after completio
 
 	laneMonitor(pi as any);
 	await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, context);
-	await waitFor(() => reportCalls === 1);
+	await waitFor(() => calls.some((call) => call.command === "lane-agent"
+		&& call.args[0] === "pdk-status"));
 	await commands.get("lane-monitor")?.handler("status", context);
-	assert.equal(reportCalls, 2);
-	assert.ok(statuses.includes("Lane: completed | completed"));
+	assert.equal(calls.some((call) => call.command === "rtl-closure"), false);
+	assert.equal(calls.some((call) => call.command === "lane-agent" && call.args[0] === "list"), false);
+	assert.equal(statuses.at(-1), "Lane monitor: idle");
 	await handlers.get("agent_start")?.({ type: "agent_start" }, context);
 	assert.equal(statuses.at(-1), "Lane: agent | processing request");
 	await commands.get("lane-monitor")?.handler("status", context);
 	assert.equal(
 		statuses.at(-1),
 		"Lane: agent | processing request",
-		"polling while the agent is busy must not restore an old terminal run",
+		"polling while the agent is busy must not display an orphaned child run",
 	);
 	await handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 	assert.equal(statuses.at(-1), "Lane monitor: idle");
 	await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
 
-	assert.equal(chipListCalls, 2);
-	assert.ok(calls.every((call) => call.command !== "rtl-closure"
-		|| call.args.join(" ") !== "report --json"));
 	assert.ok(statuses.includes("Lane monitor: idle"));
 	assert.equal(widgets.at(-1), undefined);
 });
