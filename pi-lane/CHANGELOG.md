@@ -11,6 +11,8 @@
   Human reference calibration is supplied explicitly;
 - harden orchestrator and monitor identity/error projections without adding
   private evaluation or benchmark state;
+- derive the daemon runtime fingerprint with a keyed MAC so API credentials are
+  never used as ordinary hash inputs;
 - update the pinned Pi coding agent and Pi TUI to 0.84.2.
 
 ## 0.5.1 - Initial public snapshot

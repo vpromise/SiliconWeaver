@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import socket
@@ -1620,10 +1621,19 @@ class ServiceTests(unittest.TestCase):
             **first_environment,
             "RTL_CLOSURE_API_KEY": "private-key-two",
         }
-        first = rtl_closure_runtime_config_fingerprint(first_environment)
-        second = rtl_closure_runtime_config_fingerprint(second_environment)
+        with patch("pi_lane.orchestrator.hmac.new", wraps=hmac.new) as keyed_hash:
+            first = rtl_closure_runtime_config_fingerprint(first_environment)
+            second = rtl_closure_runtime_config_fingerprint(second_environment)
         self.assertRegex(first, r"^[0-9a-f]{64}$")
         self.assertNotEqual(first, second)
+        self.assertEqual(keyed_hash.call_count, 2)
+        for call, expected_key in zip(
+            keyed_hash.call_args_list,
+            (b"private-key-one", b"private-key-two"),
+            strict=True,
+        ):
+            self.assertEqual(call.args[0], expected_key)
+            self.assertNotIn(expected_key, call.args[1])
         with tempfile.TemporaryDirectory() as directory:
             service = ProductionOrchestratorService(
                 OrchestratorStore(Path(directory) / "state.sqlite3"),
