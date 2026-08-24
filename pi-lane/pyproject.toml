@@ -32,7 +32,7 @@ Issues = "https://github.com/vpromise/SiliconWeaver/issues"
 Changelog = "https://github.com/vpromise/SiliconWeaver/blob/main/pi-lane/CHANGELOG.md"
 
 [project.optional-dependencies]
-test = ["pytest==9.1.1", "ruff==0.14.14"]
+test = ["pytest==9.1.1", "ruff==0.16.4"]
 
 [project.scripts]
 lane-agent = "pi_lane.cli:main"
@@ -71,6 +71,9 @@ where = ["src"]
 "share/pi-lane/examples/arbiters" = ["examples/arbiters/*.json"]
 "share/pi-lane/examples/counters" = ["examples/counters/*.json"]
 "share/pi-lane/examples/streaming" = ["examples/streaming/*.json"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

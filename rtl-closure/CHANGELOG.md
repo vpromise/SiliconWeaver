@@ -11,6 +11,8 @@
   state;
 - strengthen mapped-equivalence source, snapshot, Step, verdict, and run
   identity attestations;
+- update Ruff to 0.16.4 while explicitly preserving the established
+  correctness-focused lint selection;
 - classify physical-planning failures as non-RTL-repairable.
 
 ## 0.6.1 - Initial public snapshot

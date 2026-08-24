@@ -15,6 +15,8 @@
   never used as ordinary hash inputs;
 - update the TypeScript compiler to 7.0.2 while keeping Node.js type definitions
   aligned with the supported Node.js 24 runtime;
+- update Ruff to 0.16.4 while explicitly preserving the established
+  correctness-focused lint selection;
 - update the pinned Pi coding agent and Pi TUI to 0.84.2.
 
 ## 0.5.1 - Initial public snapshot
