@@ -13,6 +13,8 @@
   private evaluation or benchmark state;
 - derive the daemon runtime fingerprint with a keyed MAC so API credentials are
   never used as ordinary hash inputs;
+- update the TypeScript compiler to 7.0.2 while keeping Node.js type definitions
+  aligned with the supported Node.js 24 runtime;
 - update the pinned Pi coding agent and Pi TUI to 0.84.2.
 
 ## 0.5.1 - Initial public snapshot
